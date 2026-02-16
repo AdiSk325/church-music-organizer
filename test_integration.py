@@ -177,8 +177,10 @@ def test_required_files():
         "src/database/database.py",
         "src/ocr/sheet_music_ocr.py",
         "src/ocr/musicxml_converter.py",
+        "src/ocr/scan_processor.py",
         "src/app/main.py",
-        "tests/test_database.py"
+        "tests/test_database.py",
+        "tests/test_ocr.py"
     ]
     
     all_exist = True
