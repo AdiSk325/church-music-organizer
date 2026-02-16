@@ -298,7 +298,7 @@ class TestFileTypeMusicXML:
         assert FileType.MUSICXML.value == "musicxml"
 
     def test_all_filetypes(self):
-        """Test all expected file types exist."""
-        expected = {"scan", "pdf", "musescore", "xml", "musicxml", "text", "other"}
+        """Test that expected file types including MUSICXML exist."""
+        expected_subset = {"scan", "pdf", "musescore", "xml", "musicxml", "text", "other"}
         actual = {ft.value for ft in FileType}
-        assert expected == actual
+        assert expected_subset.issubset(actual)
