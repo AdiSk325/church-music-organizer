@@ -39,18 +39,18 @@ def test_database():
     
     # Clean up any existing test database
     import os
-    test_db = "test_church_music.db"
-    if os.path.exists(test_db):
-        os.remove(test_db)
+    test_db_path = "test_church_music.db"
+    if os.path.exists(test_db_path):
+        os.remove(test_db_path)
     
     # Set test database
-    os.environ["DATABASE_URL"] = f"sqlite:///{test_db}"
+    os.environ["DATABASE_URL"] = f"sqlite:///{test_db_path}"
     
     # Reinitialize with test database
     from src.database.database import create_engine, Base, SessionLocal
     from sqlalchemy.orm import sessionmaker
     
-    engine = create_engine(f"sqlite:///{test_db}")
+    engine = create_engine(f"sqlite:///{test_db_path}")
     Base.metadata.create_all(bind=engine)
     TestSession = sessionmaker(bind=engine)
     
@@ -102,14 +102,14 @@ def test_database():
         print(f"✓ Query returned {len(pieces)} piece(s)")
         
         # Clean up
-        os.remove(test_db)
+        os.remove(test_db_path)
         print("✓ Database tests passed")
         return True
         
     except Exception as e:
         print(f"✗ Database test failed: {e}")
-        if os.path.exists(test_db):
-            os.remove(test_db)
+        if os.path.exists(test_db_path):
+            os.remove(test_db_path)
         return False
 
 

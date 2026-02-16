@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from src.database import init_db, get_db_session, MusicPiece, MusicFile, Tag, FileType
 from src.ocr import SheetMusicOCR, MusicXMLConverter
 from datetime import datetime
+from sqlalchemy import func
 import shutil
 
 # Page configuration
@@ -363,7 +364,6 @@ elif page == "Statistics":
         
         # Files by type
         st.subheader("Files by Type")
-        from sqlalchemy import func
         file_counts = db.query(
             MusicFile.file_type, func.count(MusicFile.id)
         ).group_by(MusicFile.file_type).all()
@@ -376,7 +376,6 @@ elif page == "Statistics":
         
         # Most used tags
         st.subheader("Most Used Tags")
-        from sqlalchemy import func
         from src.database.models import MusicPieceTag
         
         tag_counts = db.query(
