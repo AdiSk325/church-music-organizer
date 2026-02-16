@@ -9,4 +9,4 @@ echo ""
 cd "$(dirname "$0")"
 
 # Run the Streamlit app
-streamlit run src/app/main.py
+poetry run streamlit run src/app/main.py
