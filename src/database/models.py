@@ -26,13 +26,20 @@ class MusicPiece(Base):
     title = Column(String(255), nullable=False)
     composer = Column(String(255))
     arranger = Column(String(255))
+    lyrics_author = Column(String(255))  # autor słów
+    music_author = Column(String(255))  # autor muzyki
+    harmony_author = Column(String(255))  # autor harmonii
     genre = Column(String(100))
     key_signature = Column(String(50))
     time_signature = Column(String(50))
+    measures_count = Column(Integer)  # ilość taktów
     tempo = Column(String(100))
     occasion = Column(String(100))  # e.g., "Easter", "Christmas", "Wedding"
     liturgical_season = Column(String(100))  # e.g., "Advent", "Lent"
     language = Column(String(50))
+    description = Column(Text)  # szczegółowy opis utworu
+    lyrics = Column(Text)  # tekst utworu
+    musescore_link = Column(String(512))  # link do zapisu w MuseScore
     notes = Column(Text)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -40,6 +47,7 @@ class MusicPiece(Base):
     # Relationships
     files = relationship("MusicFile", back_populates="music_piece", cascade="all, delete-orphan")
     tags = relationship("Tag", secondary="music_piece_tags", back_populates="music_pieces")
+    usage_history = relationship("UsageHistory", back_populates="music_piece", cascade="all, delete-orphan")
 
 
 class MusicFile(Base):
@@ -79,3 +87,18 @@ class MusicPieceTag(Base):
     
     music_piece_id = Column(Integer, ForeignKey('music_pieces.id'), primary_key=True)
     tag_id = Column(Integer, ForeignKey('tags.id'), primary_key=True)
+
+
+class UsageHistory(Base):
+    """Model for tracking when a music piece was used."""
+    __tablename__ = 'usage_history'
+    
+    id = Column(Integer, primary_key=True)
+    music_piece_id = Column(Integer, ForeignKey('music_pieces.id'), nullable=False)
+    usage_date = Column(DateTime, nullable=False)
+    event_name = Column(String(255))  # e.g., "Sunday Mass", "Wedding"
+    notes = Column(Text)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
+    # Relationships
+    music_piece = relationship("MusicPiece", back_populates="usage_history")
