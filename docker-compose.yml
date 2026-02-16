@@ -1,0 +1,13 @@
+version: '3.8'
+
+services:
+  app:
+    build: .
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./data:/app/data
+      - ./church_music.db:/app/church_music.db
+    environment:
+      - DATABASE_URL=sqlite:///church_music.db
+    restart: unless-stopped
