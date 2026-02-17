@@ -1,5 +1,8 @@
 """End-to-end processor for scanned sheet music PDFs.
 
+DEPRECATED: This module is deprecated in favor of the modular OMR pipeline v2.
+Use convert_pdf_to_musicxml.py with the new pipeline components instead.
+
 Orchestrates the full pipeline:
   PDF scan → image preprocessing → text/lyrics extraction → OMR analysis → MusicXML output.
 
@@ -8,6 +11,13 @@ The OMR step supports two backends:
   2. Built-in heuristic analysis using OpenCV + music21 – works without external tools,
      produces a skeleton MusicXML suitable for import and further editing in MuseScore.
 """
+
+import warnings
+warnings.warn(
+    "ScanProcessor is deprecated. Use the modular OMR pipeline v2 instead.",
+    DeprecationWarning,
+    stacklevel=2
+)
 
 import logging
 import os

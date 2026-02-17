@@ -21,6 +21,12 @@ except ImportError:
     MusicXMLConverter = None
 
 try:
+    from .scan_processor import ScanProcessor, ScanProcessingResult
+except ImportError:
+    ScanProcessor = None
+    ScanProcessingResult = None
+
+try:
     from .pdf_text_extractor import PDFTextExtractor, LyricsData
 except ImportError:
     PDFTextExtractor = None
@@ -53,6 +59,8 @@ __all__ = [
     # Legacy
     'SheetMusicOCR',
     'MusicXMLConverter',
+    'ScanProcessor',
+    'ScanProcessingResult',
     # Text extraction
     'PDFTextExtractor',
     'LyricsData',
