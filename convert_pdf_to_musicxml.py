@@ -30,6 +30,7 @@ from src.ocr.staff_splitter import StaffSplitter
 from src.ocr.score_builder import ScoreBuilder
 from src.ocr.lyrics_aligner import LyricsAligner
 from src.ocr.musicxml_validator import MusicXMLValidator
+from src.ocr.omr_postprocessor import OMRPostProcessor, collect_peer_metadata
 
 # Configure logging
 logging.basicConfig(
@@ -115,7 +116,12 @@ def convert_pdf_to_musicxml(
     # -------------------------------------------------------------------
     print(f"\n  [3/7] Detecting staff layout ...")
     staff_detector = StaffDetector()
-    layout = staff_detector.detect(processed_images[0])
+    all_page_layouts = []
+    for page_idx, img_path in enumerate(processed_images):
+        page_layout = staff_detector.detect(img_path)
+        all_page_layouts.append(page_layout)
+        if page_idx == 0:
+            layout = page_layout
     print(staff_detector.get_summary(layout))
 
     staves_per_system = layout.num_staves_per_system
@@ -130,19 +136,25 @@ def convert_pdf_to_musicxml(
 
     if staves_per_system >= 2 and layout.systems:
         # Split into per-staff images and run OMR on each
+        global_staff_offset = 0
         for page_idx, img_path in enumerate(processed_images):
             print(f"        Page {page_idx + 1}:")
 
-            if page_idx == 0:
-                page_layout = layout
-            else:
-                page_layout = staff_detector.detect(img_path)
+            page_layout = all_page_layouts[page_idx]
 
             staff_images = staff_splitter.split(img_path, page_layout)
 
             for si in staff_images:
                 indices_str = ",".join(str(i) for i in si["staff_indices"])
                 print(f"          Staff [{indices_str}] ({si['group_type']}) ...")
+
+                # Add global offset for multi-page staff indexing
+                si["original_staff_indices"] = list(si["staff_indices"])
+                si["staff_indices"] = [
+                    idx + global_staff_offset
+                    for idx in si["staff_indices"]
+                ]
+                si["page"] = page_idx
 
                 try:
                     result = engine.recognize(si["path"])
@@ -158,6 +170,10 @@ def convert_pdf_to_musicxml(
                     si["omr_result"] = None
 
                 all_staff_results.append(si)
+
+            # Update global offset for next page
+            if page_layout.staves:
+                global_staff_offset += len(page_layout.staves)
     else:
         # Layout detection failed or single staff — fallback to full-page OMR
         print(f"        Staff detection found {staves_per_system} staves/system.")
@@ -182,6 +198,71 @@ def convert_pdf_to_musicxml(
             return ""
 
     # -------------------------------------------------------------------
+    # Stage 5.5: Post-process OMR results
+    # -------------------------------------------------------------------
+    print(f"\n  [4.5/7] Post-processing OMR results ...")
+    postprocessor = OMRPostProcessor()
+
+    # Collect peer metadata per-page for cross-stave voting
+    # (don't vote across pages — different pages may have different time/key sigs)
+    pages_in_results = set(si.get("page", 0) for si in all_staff_results)
+    peer_meta_by_page = {}
+    for page_idx in pages_in_results:
+        page_staves = []
+        for si in all_staff_results:
+            if si.get("page", 0) != page_idx:
+                continue
+            omr = si.get("omr_result")
+            if omr and omr.success and omr.musicxml_path:
+                page_staves.append({
+                    "path": omr.musicxml_path,
+                    "staff_indices": si["staff_indices"],
+                    "group_type": si["group_type"],
+                })
+        peer_meta_by_page[page_idx] = collect_peer_metadata(page_staves)
+
+    for si in all_staff_results:
+        omr = si.get("omr_result")
+        if not omr or not omr.success or not omr.musicxml_path:
+            continue
+
+        # Use per-page peer metadata
+        page_idx = si.get("page", 0)
+        peer_meta = peer_meta_by_page.get(page_idx, {"time_sigs": [], "key_fifths": []})
+        peer_time_sigs = peer_meta.get("time_sigs", [])
+        peer_key_fifths = peer_meta.get("key_fifths", [])
+
+        # Determine clef type (for voice separation pitch threshold)
+        clef_type = si.get("clef", "G")
+        if si.get("group_type") == "brace":
+            clef_type = "G"  # grand staff — will handle internally
+
+        try:
+            corrected_path, report = postprocessor.process(
+                musicxml_path=omr.musicxml_path,
+                clef_type=clef_type,
+                peer_time_sigs=peer_time_sigs,
+                peer_key_fifths=peer_key_fifths,
+            )
+            si["postprocess_report"] = report
+            changes = []
+            if report.chords_split:
+                changes.append(f"{report.chords_split} chords split")
+            if report.phantom_notes_removed:
+                changes.append(f"{report.phantom_notes_removed} phantoms removed")
+            if report.time_sig_corrected:
+                changes.append(f"time sig → {report.corrected_time_sig}")
+            if report.key_sig_corrected:
+                changes.append(f"key sig → {report.corrected_key_sig}")
+            if report.beats_normalized:
+                changes.append(f"{report.beats_normalized} measures normalized")
+            if changes:
+                indices_str = ",".join(str(i) for i in si["staff_indices"])
+                print(f"        Staff [{indices_str}]: {', '.join(changes)}")
+        except Exception as e:
+            logger.warning(f"Post-processing failed for staff {si['staff_indices']}: {e}")
+
+    # -------------------------------------------------------------------
     # Stage 6: Score Building — assemble multi-part MusicXML
     # -------------------------------------------------------------------
     print(f"\n  [5/7] Building multi-part MusicXML ...")
@@ -195,11 +276,19 @@ def convert_pdf_to_musicxml(
     for si in all_staff_results:
         omr = si.get("omr_result")
         if omr and omr.success and omr.musicxml_path:
-            staff_omr_for_builder.append({
+            entry = {
                 "path": omr.musicxml_path,
                 "staff_indices": si["staff_indices"],
                 "group_type": si["group_type"],
-            })
+            }
+            # Add metadata for multi-page/multi-system mapping
+            if "clef" in si:
+                entry["clef"] = si["clef"]
+            if "page" in si:
+                entry["page"] = si["page"]
+            if "original_staff_indices" in si:
+                entry["original_staff_indices"] = si["original_staff_indices"]
+            staff_omr_for_builder.append(entry)
 
     if len(staff_omr_for_builder) >= 2:
         musicxml_out = builder.build(
@@ -207,6 +296,7 @@ def convert_pdf_to_musicxml(
             text_info=text_info,
             layout=layout,
             output_path=final_output,
+            all_page_layouts=all_page_layouts if len(all_page_layouts) > 1 else None,
         )
         print(f"        Assembled {len(staff_omr_for_builder)} staff results")
     elif len(staff_omr_for_builder) == 1:

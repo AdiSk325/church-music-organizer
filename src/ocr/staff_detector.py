@@ -14,7 +14,7 @@ enabling per-staff OMR and correct multi-part assembly.
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -118,7 +118,12 @@ class StaffDetector:
             return layout
 
         # Step 3: Detect systems
-        layout.systems = self._detect_systems(layout.staves)
+        layout.systems = self._detect_systems(layout.staves, binary)
+
+        # Step 3b: Filter phantom staves
+        layout.staves, layout.systems = self._filter_phantom_staves(
+            layout.staves, layout.systems, binary
+        )
 
         # Step 4: Detect staff groups (brackets/braces)
         layout.groups = self._detect_groups(layout.staves, layout.systems, binary)
@@ -257,16 +262,29 @@ class StaffDetector:
             line_spacing=avg_spacing,
         )
 
-    def _detect_systems(self, staves: List[StaffInfo]) -> List[SystemInfo]:
+    def _detect_systems(
+        self, staves: List[StaffInfo], binary: Optional[np.ndarray] = None
+    ) -> List[SystemInfo]:
         """Detect systems — groups of staves that form a horizontal row.
 
-        In a typical SATB+Organ score, one system contains:
-        staff 0 (SA), staff 1 (TB), staff 2 (Org treble), staff 3 (Org bass)
+        Uses a hybrid approach:
+        1. Gap analysis — large gaps between staves indicate system breaks
+        2. Barline spanning — a vertical barline connecting staves = same system
+        3. Consistency check — all systems should have the same # of staves
 
-        Systems are separated by large vertical gaps.
+        In a typical church music score, one system contains:
+        staff 0 (SA), staff 1 (TB), staff 2 (Org treble), staff 3 (Org bass)
         """
         if not staves:
             return []
+
+        if len(staves) == 1:
+            return [SystemInfo(
+                system_index=0,
+                staff_indices=[staves[0].index],
+                y_top=staves[0].y_top,
+                y_bottom=staves[0].y_bottom,
+            )]
 
         # Calculate gaps between consecutive staves
         gaps = []
@@ -282,9 +300,40 @@ class StaffDetector:
                 y_bottom=staves[-1].y_bottom,
             )]
 
-        # System breaks: gaps significantly larger than the median
-        median_gap = np.median(gaps)
-        system_break_threshold = median_gap * 1.8
+        # ---- Strategy 1: Try barline spanning detection ----
+        if binary is not None:
+            barline_systems = self._detect_systems_by_barline(
+                staves, binary
+            )
+            if barline_systems and self._systems_are_consistent(barline_systems):
+                logger.debug(
+                    f"System detection via barline: "
+                    f"{len(barline_systems)} systems"
+                )
+                return barline_systems
+
+        # ---- Strategy 2: Gap-based clustering ----
+        # Use kmeans-style gap analysis: find natural breakpoints
+        sorted_gaps = sorted(gaps)
+        n_gaps = len(sorted_gaps)
+
+        # Find the largest single jump in gap sizes
+        best_break = None
+        best_ratio = 0
+        for i in range(n_gaps - 1):
+            if sorted_gaps[i] > 0:
+                ratio = sorted_gaps[i + 1] / sorted_gaps[i]
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best_break = (sorted_gaps[i] + sorted_gaps[i + 1]) / 2
+
+        # Need a clear break (ratio > 1.5) and the gap should be significant
+        if best_break and best_ratio > 1.5:
+            system_break_threshold = best_break
+        else:
+            # Fallback: use median * 1.8
+            median_gap = np.median(gaps)
+            system_break_threshold = median_gap * 1.8
 
         systems = []
         current_staves = [staves[0].index]
@@ -312,7 +361,143 @@ class StaffDetector:
             y_bottom=staves[-1].y_bottom,
         ))
 
+        # ---- Consistency check ----
+        # All systems should have the same number of staves
+        # If not, try to fix by adjusting the threshold
+        if not self._systems_are_consistent(systems) and len(staves) >= 4:
+            # Try even split
+            even_systems = self._try_even_split(staves)
+            if even_systems and self._systems_are_consistent(even_systems):
+                systems = even_systems
+
         return systems
+
+    def _detect_systems_by_barline(
+        self, staves: List[StaffInfo], binary: np.ndarray
+    ) -> List[SystemInfo]:
+        """Detect systems by checking which staves share a left barline.
+
+        A system barline is a vertical line on the left side that connects
+        the topmost and bottommost staves in a system.
+        """
+        if len(staves) < 2:
+            return []
+
+        # Find the left edge of staves (where the system barline should be)
+        x_left = min(s.x_left for s in staves)
+        # Check a narrow column right at x_left
+        x_start = max(0, x_left - 5)
+        x_end = min(binary.shape[1], x_left + 10)
+        barline_col = binary[:, x_start:x_end]
+
+        if barline_col.size == 0:
+            return []
+
+        v_proj = np.sum(barline_col, axis=1) / 255
+
+        # For each pair of consecutive staves, check if a barline
+        # connects them (continuous black in the gap region)
+        connected = []
+        for i in range(len(staves) - 1):
+            gap_start = staves[i].y_bottom
+            gap_end = staves[i + 1].y_top
+            if gap_end <= gap_start:
+                connected.append(True)
+                continue
+            gap_region = v_proj[gap_start:gap_end]
+            if len(gap_region) == 0:
+                connected.append(False)
+                continue
+            coverage = np.sum(gap_region > 0) / len(gap_region)
+            connected.append(coverage > 0.5)
+
+        # Build systems from connected staves
+        systems = []
+        current = [staves[0].index]
+        for i, is_connected in enumerate(connected):
+            if is_connected:
+                current.append(staves[i + 1].index)
+            else:
+                system_staves = [s for s in staves if s.index in current]
+                systems.append(SystemInfo(
+                    system_index=len(systems),
+                    staff_indices=list(current),
+                    y_top=system_staves[0].y_top,
+                    y_bottom=system_staves[-1].y_bottom,
+                ))
+                current = [staves[i + 1].index]
+
+        # Last system
+        system_staves = [s for s in staves if s.index in current]
+        if system_staves:
+            systems.append(SystemInfo(
+                system_index=len(systems),
+                staff_indices=list(current),
+                y_top=system_staves[0].y_top,
+                y_bottom=system_staves[-1].y_bottom,
+            ))
+
+        return systems
+
+    def _systems_are_consistent(self, systems: List[SystemInfo]) -> bool:
+        """Check if all systems have the same number of staves."""
+        if len(systems) <= 1:
+            return True
+        sizes = [len(s.staff_indices) for s in systems]
+        return len(set(sizes)) == 1 and all(s >= 2 for s in sizes)
+
+    def _try_even_split(self, staves: List[StaffInfo]) -> List[SystemInfo]:
+        """Try to split staves evenly into systems.
+
+        If we have 4 staves, try 2 systems of 2.
+        If we have 6 staves, try 2 systems of 3 or 3 systems of 2.
+        """
+        n = len(staves)
+        best_systems = None
+        best_score = -1
+
+        for staves_per_system in range(2, min(n, 5)):
+            if n % staves_per_system != 0:
+                continue
+            systems = []
+            for i in range(0, n, staves_per_system):
+                group = staves[i:i + staves_per_system]
+                systems.append(SystemInfo(
+                    system_index=len(systems),
+                    staff_indices=[s.index for s in group],
+                    y_top=group[0].y_top,
+                    y_bottom=group[-1].y_bottom,
+                ))
+
+            # Score: prefer splits where inter-system gaps are larger
+            # than intra-system gaps
+            if len(systems) > 1:
+                inter_gaps = []
+                intra_gaps = []
+                for si, sys in enumerate(systems):
+                    sys_staves = [s for s in staves if s.index in sys.staff_indices]
+                    for j in range(len(sys_staves) - 1):
+                        intra_gaps.append(
+                            sys_staves[j + 1].y_top - sys_staves[j].y_bottom
+                        )
+                    if si < len(systems) - 1:
+                        next_sys_staves = [
+                            s for s in staves
+                            if s.index in systems[si + 1].staff_indices
+                        ]
+                        inter_gaps.append(
+                            next_sys_staves[0].y_top - sys_staves[-1].y_bottom
+                        )
+
+                if intra_gaps and inter_gaps:
+                    avg_inter = np.mean(inter_gaps)
+                    avg_intra = np.mean(intra_gaps) if intra_gaps else avg_inter
+                    score = avg_inter / max(avg_intra, 1)
+                    if score > best_score:
+                        best_score = score
+                        best_systems = systems
+
+        return best_systems
 
     def _detect_groups(
         self,
@@ -322,77 +507,140 @@ class StaffDetector:
     ) -> List[StaffGroup]:
         """Detect staff groups (brackets/braces) connecting staves.
 
-        Looks for vertical elements at the left margin that connect
-        multiple staves. A bracket (thin vertical line) connects vocal
-        parts; a brace (curly) connects grand staff (piano/organ).
+        IMPORTANT: Groups are detected WITHIN each system only.
+        A brace (grand staff) connects exactly 2 adjacent staves
+        within the same system. A bracket connects vocal parts.
+
+        Uses two strategies:
+        1. Visual: look for brace/bracket symbols to the left of the
+           system barline (further left than the barline itself)
+        2. Spacing: within a system, closely-spaced staves = grand staff
         """
         if not systems or not staves:
             return []
 
-        groups = []
-        first_system = systems[0]
-        system_staves = [s for s in staves if s.index in first_system.staff_indices]
+        all_groups = []
 
-        if len(system_staves) < 2:
+        # Analyze each system independently
+        for sys_info in systems:
+            sys_staves = [
+                s for s in staves if s.index in sys_info.staff_indices
+            ]
+            if len(sys_staves) < 2:
+                continue
+
+            sys_groups = self._detect_groups_in_system(
+                sys_staves, binary
+            )
+            all_groups.extend(sys_groups)
+
+        if not all_groups:
+            # Try spacing-based inference per system
+            for sys_info in systems:
+                sys_staves = [
+                    s for s in staves if s.index in sys_info.staff_indices
+                ]
+                if len(sys_staves) >= 2:
+                    inferred = self._infer_groups_from_spacing(sys_staves)
+                    all_groups.extend(inferred)
+
+        return self._deduplicate_groups(all_groups)
+
+    def _detect_groups_in_system(
+        self,
+        system_staves: List[StaffInfo],
+        binary: np.ndarray,
+    ) -> List[StaffGroup]:
+        """Detect brace/bracket groups within a single system.
+
+        Looks for visual connectors in the far-left margin region,
+        further left than the system barline.
+        """
+        groups = []
+        x_left = min(s.x_left for s in system_staves)
+
+        # Brace is typically 15-40px to the left of the system barline
+        # We look further left than the barline itself
+        brace_x_end = max(0, x_left - 5)
+        brace_x_start = max(0, x_left - 50)
+        brace_region = binary[:, brace_x_start:brace_x_end]
+
+        if brace_region.size == 0:
             return groups
 
-        # Look for vertical connectors left of the staves
-        # Check the region to the left of the first staff's x_left
-        x_left = min(s.x_left for s in system_staves)
-        margin_region = binary[:, max(0, x_left - 60):x_left]
+        brace_proj = np.sum(brace_region, axis=1) / 255
 
-        if margin_region.size == 0:
-            return self._infer_groups_from_spacing(system_staves)
+        # Check ONLY adjacent pairs within this system for brace
+        for i in range(len(system_staves) - 1):
+            s_top = system_staves[i]
+            s_bot = system_staves[i + 1]
 
-        # Vertical projection in the margin region
-        v_proj = np.sum(margin_region, axis=1) / 255
+            y_start = max(0, s_top.y_top - 10)
+            y_end = min(len(brace_proj), s_bot.y_bottom + 10)
 
-        # Look for continuous vertical stretches of black pixels
-        # A bracket connects from one staff's y_top to another's y_bottom
-        for i in range(len(system_staves)):
-            for j in range(i + 1, len(system_staves)):
-                y_start = system_staves[i].y_top - 5
-                y_end = system_staves[j].y_bottom + 5
-                y_start = max(0, y_start)
-                y_end = min(len(v_proj), y_end)
-                
-                if y_end <= y_start:
-                    continue
+            if y_end <= y_start:
+                continue
 
-                # Check if there's a continuous vertical line in this range
-                region = v_proj[y_start:y_end]
-                if len(region) == 0:
-                    continue
+            region = brace_proj[y_start:y_end]
+            if len(region) == 0:
+                continue
 
-                # A connector should have most rows with some black pixels
-                coverage = np.sum(region > 0) / len(region)
-                
-                if coverage > 0.7:
-                    # Determine type: brace (curly) vs bracket (straight)
-                    # Braces are typically thicker and connect exactly 2 staves
-                    indices = list(range(i, j + 1))
-                    staff_idx_list = [system_staves[k].index for k in indices]
-                    
-                    if j - i == 1:
-                        # 2 adjacent staves — could be grand staff (brace)
-                        avg_thickness = np.mean(region[region > 0])
-                        if avg_thickness > 5:
-                            group_type = "brace"
-                        else:
-                            group_type = "bracket"
-                    else:
-                        group_type = "bracket"
+            # Brace should have significant coverage in this region
+            coverage = np.sum(region > 0) / len(region)
 
+            # Also check that it does NOT extend beyond this pair
+            # (i.e., it's not just the system barline)
+            extends_above = False
+            extends_below = False
+
+            if i > 0:
+                # Check if brace extends to the staff above
+                prev_bot = system_staves[i - 1].y_bottom
+                above_region = brace_proj[
+                    max(0, prev_bot):max(0, s_top.y_top - 15)
+                ]
+                if len(above_region) > 5:
+                    above_cov = np.sum(above_region > 0) / len(above_region)
+                    extends_above = above_cov > 0.3
+
+            if i + 2 < len(system_staves):
+                # Check if brace extends to the staff below
+                next_top = system_staves[i + 2].y_top
+                below_region = brace_proj[
+                    min(len(brace_proj), s_bot.y_bottom + 15):
+                    min(len(brace_proj), next_top)
+                ]
+                if len(below_region) > 5:
+                    below_cov = np.sum(below_region > 0) / len(below_region)
+                    extends_below = below_cov > 0.3
+
+            if coverage > 0.5 and not extends_above and not extends_below:
+                # This is a local connector (brace) for just this pair
+                avg_thickness = np.mean(region[region > 0]) if np.any(region > 0) else 0
+                if avg_thickness > 3:
                     groups.append(StaffGroup(
-                        group_type=group_type,
-                        staff_indices=staff_idx_list,
+                        group_type="brace",
+                        staff_indices=[s_top.index, s_bot.index],
                     ))
 
-        if not groups:
-            return self._infer_groups_from_spacing(system_staves)
+        # If no brace found but all staves connected, it's a bracket
+        if not groups and len(system_staves) > 1:
+            # Check for bracket (full system connector)
+            y_start = max(0, system_staves[0].y_top - 5)
+            y_end = min(
+                len(brace_proj), system_staves[-1].y_bottom + 5
+            )
+            region = brace_proj[y_start:y_end]
+            if len(region) > 0:
+                coverage = np.sum(region > 0) / len(region)
+                if coverage > 0.6:
+                    groups.append(StaffGroup(
+                        group_type="bracket",
+                        staff_indices=[
+                            s.index for s in system_staves
+                        ],
+                    ))
 
-        # Remove redundant sub-groups
-        groups = self._deduplicate_groups(groups)
         return groups
 
     def _infer_groups_from_spacing(
@@ -402,6 +650,9 @@ class StaffDetector:
 
         Heuristic: staves very close together (small gap) form a grand staff
         (e.g., organ). Staves with moderate gaps are separate parts (vocal).
+
+        Uses adaptive threshold: the smallest gap in a system is likely
+        the grand staff gap (treble + bass clef together).
         """
         if len(staves) < 2:
             return []
@@ -415,20 +666,48 @@ class StaffDetector:
         if not gaps:
             return groups
 
-        median_gap = np.median(gaps)
-
-        # Find pairs/groups of closely-spaced staves (grand staff)
-        i = 0
-        while i < len(staves):
-            if i < len(gaps) and gaps[i] < median_gap * 0.6:
-                # This staff and the next are closely spaced — grand staff
+        # If only 2 staves, they might be a grand staff
+        if len(staves) == 2:
+            # Church music: 2 staves = either SA+TB or grand staff organ
+            # Grand staff has smaller gap than vocal parts
+            staff_height = np.mean([
+                s.y_bottom - s.y_top for s in staves
+            ])
+            if gaps[0] < staff_height * 1.5:
                 groups.append(StaffGroup(
                     group_type="brace",
-                    staff_indices=[staves[i].index, staves[i + 1].index],
+                    staff_indices=[staves[0].index, staves[1].index],
                 ))
-                i += 2
-            else:
-                i += 1
+            return groups
+
+        # For 3+ staves: find the smallest gap and check if it's
+        # significantly smaller than others
+        min_gap = min(gaps)
+        max_gap = max(gaps)
+
+        if max_gap > 0 and min_gap / max_gap < 0.7:
+            # There's a clear gap difference — smallest gaps = grand staff
+            threshold = (min_gap + max_gap) / 2
+
+            i = 0
+            while i < len(staves):
+                if i < len(gaps) and gaps[i] < threshold:
+                    groups.append(StaffGroup(
+                        group_type="brace",
+                        staff_indices=[staves[i].index, staves[i + 1].index],
+                    ))
+                    i += 2
+                else:
+                    i += 1
+        else:
+            # All gaps similar — likely all single staves or all grand staff pairs
+            # In church music with even staves, try pairing (0,1), (2,3), etc.
+            if len(staves) % 2 == 0 and len(staves) <= 4:
+                for i in range(0, len(staves), 2):
+                    groups.append(StaffGroup(
+                        group_type="brace",
+                        staff_indices=[staves[i].index, staves[i + 1].index],
+                    ))
 
         return groups
 
@@ -450,6 +729,143 @@ class StaffDetector:
             if not is_subset:
                 result.append(g)
         return result
+
+    def _filter_phantom_staves(
+        self,
+        staves: List[StaffInfo],
+        systems: List[SystemInfo],
+        binary: np.ndarray,
+    ) -> Tuple[List[StaffInfo], List[SystemInfo]]:
+        """Remove phantom staves (text/lyrics detected as staves).
+
+        A phantom staff has very low note-like content compared to real
+        staves. We detect this by:
+        - Checking if the staff region has black pixel density much
+          lower than other staves (after removing the staff lines)
+        - If the staff is in the bottom 10% of the page (likely footer)
+        - If the staff's horizontal extent is much shorter than others
+        """
+        if len(staves) <= 2:
+            return staves, systems
+
+        # Calculate content density for each staff
+        densities = []
+        for s in staves:
+            y_top = max(0, s.y_top - 5)
+            y_bot = min(binary.shape[0], s.y_bottom + 5)
+            region = binary[y_top:y_bot, s.x_left:s.x_right]
+            if region.size > 0:
+                density = np.sum(region) / (255.0 * region.size)
+            else:
+                density = 0.0
+            densities.append(density)
+
+        if not densities:
+            return staves, systems
+
+        median_density = np.median(densities)
+        median_width = np.median([s.x_right - s.x_left for s in staves])
+
+        # Filter
+        kept_staves = []
+        for s, d in zip(staves, densities):
+            staff_width = s.x_right - s.x_left
+            is_phantom = False
+
+            # Very low density compared to median
+            if d < median_density * 0.3 and median_density > 0:
+                is_phantom = True
+            # Much shorter than median width
+            if staff_width < median_width * 0.5:
+                is_phantom = True
+            # In footer region
+            if s.y_center > binary.shape[0] * 0.92:
+                is_phantom = True
+
+            if is_phantom:
+                logger.info(
+                    f"Filtering phantom staff {s.index}: "
+                    f"density={d:.3f}, width={staff_width}"
+                )
+            else:
+                kept_staves.append(s)
+
+        if len(kept_staves) == len(staves):
+            return staves, systems
+
+        # Re-index kept staves
+        for i, s in enumerate(kept_staves):
+            s.index = i
+
+        # Re-detect systems on kept staves
+        new_systems = self._detect_systems(kept_staves)
+
+        return kept_staves, new_systems
+
+    @staticmethod
+    def update_groups_from_clefs(
+        layout: 'StaffLayout',
+        clef_map: Dict[int, str],
+    ) -> 'StaffLayout':
+        """Update staff groups based on clef information from OMR.
+
+        This method should be called AFTER OMR, when we know each staff's
+        clef. Adjacent staves with G+F clefs in the same system
+        are grouped as grand staff (brace).
+
+        Args:
+            layout: Current StaffLayout (groups may be empty/wrong)
+            clef_map: {staff_index: 'G' or 'F'} from OMR results
+
+        Returns:
+            Updated StaffLayout with corrected groups
+        """
+        if not clef_map or not layout.systems:
+            return layout
+
+        new_groups = []
+
+        for sys_info in layout.systems:
+            sys_indices = sys_info.staff_indices
+            if len(sys_indices) < 2:
+                continue
+
+            # Look for adjacent G+F pairs → grand staff (brace)
+            i = 0
+            braced = set()
+            while i < len(sys_indices) - 1:
+                idx_a = sys_indices[i]
+                idx_b = sys_indices[i + 1]
+                clef_a = clef_map.get(idx_a, "?")
+                clef_b = clef_map.get(idx_b, "?")
+
+                if clef_a == "G" and clef_b == "F":
+                    new_groups.append(StaffGroup(
+                        group_type="brace",
+                        staff_indices=[idx_a, idx_b],
+                    ))
+                    braced.add(idx_a)
+                    braced.add(idx_b)
+                    i += 2
+                else:
+                    i += 1
+
+            # Non-braced staves within the system get a bracket
+            # if there are multiple unbraced staves
+            unbraced = [
+                idx for idx in sys_indices if idx not in braced
+            ]
+            if len(unbraced) >= 2:
+                new_groups.append(StaffGroup(
+                    group_type="bracket",
+                    staff_indices=unbraced,
+                ))
+
+        layout.groups = new_groups
+        logger.info(
+            f"Updated groups from clefs: {len(new_groups)} groups"
+        )
+        return layout
 
     def get_summary(self, layout: StaffLayout) -> str:
         """Human-readable summary of detected layout."""

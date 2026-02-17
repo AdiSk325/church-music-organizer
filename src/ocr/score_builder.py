@@ -77,26 +77,35 @@ class ScoreBuilder:
         text_info: ClassifiedText,
         layout: StaffLayout,
         output_path: str,
+        all_page_layouts: Optional[List[StaffLayout]] = None,
     ) -> str:
         """Build a complete MusicXML score.
 
         Args:
             staff_omr_results: List of {"path": musicxml_path,
-                "staff_indices": [int], "group_type": str}
+                "staff_indices": [int], "group_type": str,
+                "page": int (optional), "system": int (optional),
+                "clef": str (optional, "G" or "F")}
             text_info: Classified text from PDF
-            layout: Staff layout from detector
+            layout: Staff layout from detector (first page or all)
             output_path: Where to save the final MusicXML
+            all_page_layouts: Layouts for all pages (for multi-page)
 
         Returns:
             Path to the output MusicXML file
         """
-        # Step 1: Determine part structure from layout + text
+        # Step 1: Determine part structure from layout + text + clef info
+        # Use clef info from OMR results for more reliable grouping
+        clef_map = self._extract_clef_map(staff_omr_results)
+        if clef_map:
+            from .staff_detector import StaffDetector
+            layout = StaffDetector.update_groups_from_clefs(layout, clef_map)
+
         parts_def = self._determine_parts(layout, text_info)
-        
+
         if not parts_def:
             logger.warning("Could not determine part structure, "
                            "falling back to single part")
-            # Fallback: if we have OMR results, use the first one as-is
             if staff_omr_results:
                 import shutil
                 shutil.copy2(staff_omr_results[0]["path"], output_path)
@@ -119,10 +128,19 @@ class ScoreBuilder:
             except Exception as e:
                 logger.warning(f"Could not parse {omr_result['path']}: {e}")
 
-        # Step 3: Build the MusicXML using ElementTree for precise control
-        musicxml = self._build_musicxml(parts_def, parsed_parts, text_info, layout)
+        # Step 3: Multi-system/multi-page assembly
+        # Group OMR results by part assignment (which part they belong to)
+        part_omr_mapping = self._map_staves_to_parts(
+            staff_omr_results, parts_def, layout, all_page_layouts
+        )
 
-        # Step 4: Write output
+        # Step 4: Build the MusicXML using ElementTree for precise control
+        musicxml = self._build_musicxml_assembled(
+            parts_def, parsed_parts, part_omr_mapping, text_info, layout,
+            all_page_layouts=all_page_layouts,
+        )
+
+        # Step 5: Write output
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -384,6 +402,850 @@ class ScoreBuilder:
         if len(name) <= 4:
             return name
         return name[:3] + "."
+
+    # ==================================================================
+    # Multi-system / multi-page assembly helpers
+    # ==================================================================
+
+    def _extract_clef_map(
+        self, staff_omr_results: List[dict]
+    ) -> Dict[int, str]:
+        """Extract clef type from each staff's OMR result.
+
+        Reads the first clef found in each parsed MusicXML to build
+        a mapping {staff_index: "G" or "F"}.
+        """
+        clef_map: Dict[int, str] = {}
+
+        for omr in staff_omr_results:
+            path = omr.get("path", "")
+            indices = omr.get("staff_indices", [])
+            if not path or not Path(path).exists() or not indices:
+                continue
+
+            # If clef was already annotated (e.g., by postprocessor)
+            if "clef" in omr:
+                for idx in indices:
+                    clef_map[idx] = omr["clef"]
+                continue
+
+            try:
+                score = converter.parse(path)
+                if not score.parts:
+                    continue
+                part = score.parts[0]
+                clefs_found = list(
+                    part.flatten().getElementsByClass("Clef")
+                )
+                if clefs_found:
+                    first_clef = clefs_found[0]
+                    clef_sign = "G"
+                    if isinstance(first_clef, clef.BassClef):
+                        clef_sign = "F"
+                    elif isinstance(first_clef, clef.TrebleClef):
+                        clef_sign = "G"
+                    elif hasattr(first_clef, 'sign'):
+                        clef_sign = first_clef.sign
+                    for idx in indices:
+                        clef_map[idx] = clef_sign
+                else:
+                    # Infer from note range
+                    notes = list(part.flatten().notes)
+                    if notes:
+                        avg_midi = sum(
+                            n.pitch.midi for n in notes
+                            if hasattr(n, 'pitch')
+                        ) / max(1, len([
+                            n for n in notes if hasattr(n, 'pitch')
+                        ]))
+                        clef_sign = "G" if avg_midi >= 55 else "F"
+                        for idx in indices:
+                            clef_map[idx] = clef_sign
+            except Exception as e:
+                logger.debug(f"Could not extract clef from {path}: {e}")
+
+        return clef_map
+
+    def _map_staves_to_parts(
+        self,
+        staff_omr_results: List[dict],
+        parts_def: List[PartDefinition],
+        layout: StaffLayout,
+        all_page_layouts: Optional[List['StaffLayout']] = None,
+    ) -> Dict[int, List[dict]]:
+        """Map OMR results from multiple systems/pages to part indices.
+
+        For multi-system scores, each system contributes additional
+        measures to the same parts. Matching uses relative position
+        within each system (0th staff = first part, etc.).
+
+        Args:
+            staff_omr_results: All OMR results with staff_indices and
+                optional "page" and "original_staff_indices" keys
+            parts_def: Part definitions (from first system)
+            layout: Staff layout (first page)
+            all_page_layouts: Optional layouts for additional pages
+
+        Returns:
+            Dict mapping part_index (0-based) to list of OMR result dicts
+            in order (system 1 first, then system 2, etc.)
+        """
+        part_mapping: Dict[int, List[dict]] = {
+            i: [] for i in range(len(parts_def))
+        }
+
+        # Build part → relative positions mapping from first system
+        # e.g., part 0 (Org grand staff): staff [0,1] → positions [0,1]
+        # e.g., part 0 (Org): all staves → positions [0,1,2,3]
+        part_positions: Dict[int, List[int]] = {}
+        first_sys = layout.systems[0] if layout.systems else None
+        if first_sys:
+            for pi, pdef in enumerate(parts_def):
+                positions = []
+                for si in pdef.staff_indices:
+                    if si in first_sys.staff_indices:
+                        pos = first_sys.staff_indices.index(si)
+                        positions.append(pos)
+                part_positions[pi] = positions
+
+        # Calculate staves per system (from first page first system)
+        staves_per_system = len(first_sys.staff_indices) if first_sys else 4
+
+        for omr in staff_omr_results:
+            indices = omr.get("staff_indices", [])
+            if not indices:
+                if parts_def:
+                    part_mapping[0].append(omr)
+                continue
+
+            matched_part = None
+
+            # Get local indices — use original_staff_indices if available
+            local_indices = omr.get(
+                "original_staff_indices", indices
+            )
+
+            # Get the page index for this OMR result
+            page_idx = omr.get("page", 0)
+
+            # Get the layout for this page
+            pg_layout = layout
+            if all_page_layouts and page_idx < len(all_page_layouts):
+                pg_layout = all_page_layouts[page_idx]
+
+            # Method 1: Direct match with first system's parts
+            # (works for page 0, system 0 only)
+            if page_idx == 0:
+                key_tuple = tuple(sorted(local_indices))
+                for pi, pdef in enumerate(parts_def):
+                    if tuple(sorted(pdef.staff_indices)) == key_tuple:
+                        matched_part = pi
+                        break
+
+            # Method 2: Match by relative position within system
+            if matched_part is None:
+                for sys_info in pg_layout.systems:
+                    if all(
+                        i in sys_info.staff_indices
+                        for i in local_indices
+                    ):
+                        # Found the system — get relative positions
+                        rel_positions = sorted([
+                            sys_info.staff_indices.index(i)
+                            for i in local_indices
+                        ])
+                        # Exact match
+                        for pi, ppositions in part_positions.items():
+                            if rel_positions == sorted(ppositions):
+                                matched_part = pi
+                                break
+                        # Subset match — single staff belonging to
+                        # a multi-staff part (e.g., bass staff of organ)
+                        if matched_part is None:
+                            for pi, ppositions in part_positions.items():
+                                if set(rel_positions).issubset(
+                                    set(ppositions)
+                                ):
+                                    matched_part = pi
+                                    break
+                        break
+
+            # Method 3: Match by position assuming same layout
+            # as first page (fallback for multi-page)
+            if matched_part is None:
+                # Assume staves in same position across pages
+                # map to the same part
+                for pi, ppositions in part_positions.items():
+                    # Check if local indices match part positions
+                    if sorted(local_indices) == sorted(
+                        first_sys.staff_indices[p]
+                        for p in ppositions
+                        if p < len(first_sys.staff_indices)
+                    ):
+                        matched_part = pi
+                        break
+
+            # Method 4: Brute-force by counting staves per group
+            if matched_part is None:
+                # Map by relative position in the group type
+                group_type = omr.get("group_type", "single")
+                n_staves = len(local_indices)
+
+                for pi, pdef in enumerate(parts_def):
+                    if (pdef.num_staves == n_staves
+                            and pdef.group_type == group_type):
+                        # Check not already assigned from same page+system
+                        already = any(
+                            o.get("page") == page_idx
+                            and o.get("original_staff_indices")
+                            == local_indices
+                            for o in part_mapping[pi]
+                        )
+                        if not already:
+                            matched_part = pi
+                            break
+
+            if matched_part is not None:
+                part_mapping[matched_part].append(omr)
+                logger.debug(
+                    f"Mapped staff {indices} (local {local_indices}) "
+                    f"→ part {matched_part} ({parts_def[matched_part].part_name})"
+                )
+            else:
+                logger.warning(
+                    f"Could not map staff {indices} "
+                    f"(local {local_indices}) to any part"
+                )
+
+        return part_mapping
+
+    def _all_systems(
+        self,
+        layout: StaffLayout,
+        all_page_layouts: Optional[List[StaffLayout]],
+    ) -> List:
+        """Get all SystemInfo objects across all pages."""
+        systems = []
+        if all_page_layouts:
+            for pg in all_page_layouts:
+                systems.extend(pg.systems)
+        else:
+            systems.extend(layout.systems)
+        return systems
+
+    def _different_system(
+        self,
+        omr_a: dict,
+        omr_b: dict,
+        layout: StaffLayout,
+        all_page_layouts: Optional[List[StaffLayout]],
+    ) -> bool:
+        """Check if two OMR results come from different systems."""
+        indices_a = set(omr_a.get("staff_indices", []))
+        indices_b = set(omr_b.get("staff_indices", []))
+
+        for sys_info in self._all_systems(layout, all_page_layouts):
+            sys_set = set(sys_info.staff_indices)
+            if indices_a & sys_set and indices_b & sys_set:
+                return False  # Same system
+        return True
+
+    def _build_musicxml_assembled(
+        self,
+        parts_def: List[PartDefinition],
+        parsed_parts: Dict[tuple, object],
+        part_omr_mapping: Dict[int, List[dict]],
+        text_info: ClassifiedText,
+        layout: StaffLayout,
+        all_page_layouts: Optional[List[StaffLayout]] = None,
+    ) -> ET.Element:
+        """Build MusicXML with multi-system assembly.
+
+        Unlike _build_musicxml which maps 1 OMR result → 1 part,
+        this method concatenates measures from multiple OMR results
+        (one per system/page) into each part.
+        """
+        root = ET.Element("score-partwise", version="4.0")
+
+        # --- Work/movement titles ---
+        if text_info.title:
+            work = ET.SubElement(root, "work")
+            ET.SubElement(work, "work-title").text = text_info.title
+
+        # --- Identification ---
+        ident = ET.SubElement(root, "identification")
+        if text_info.composer:
+            ET.SubElement(ident, "creator", type="composer").text = (
+                text_info.composer
+            )
+        if text_info.arranger:
+            ET.SubElement(ident, "creator", type="arranger").text = (
+                text_info.arranger
+            )
+        encoding = ET.SubElement(ident, "encoding")
+        ET.SubElement(encoding, "software").text = (
+            "Church Music Organizer OMR"
+        )
+        ET.SubElement(encoding, "encoding-date").text = "2025-07-26"
+
+        # --- Part list ---
+        part_list = ET.SubElement(root, "part-list")
+
+        vocal_parts = [
+            p for p in parts_def if p.is_vocal and p.group_number > 0
+        ]
+        if vocal_parts:
+            group_num = vocal_parts[0].group_number
+            pg_start = ET.SubElement(
+                part_list, "part-group",
+                type="start", number=str(group_num)
+            )
+            ET.SubElement(pg_start, "group-symbol").text = "bracket"
+            ET.SubElement(pg_start, "group-barline").text = "yes"
+
+        for i, pdef in enumerate(parts_def):
+            sp = ET.SubElement(
+                part_list, "score-part", id=pdef.part_id
+            )
+            ET.SubElement(sp, "part-name").text = pdef.part_name
+            if pdef.abbreviation:
+                ET.SubElement(
+                    sp, "part-abbreviation"
+                ).text = pdef.abbreviation
+
+            inst_id = f"{pdef.part_id}-I1"
+            si = ET.SubElement(sp, "score-instrument", id=inst_id)
+            ET.SubElement(
+                si, "instrument-name"
+            ).text = pdef.instrument_name
+            if pdef.instrument_sound:
+                ET.SubElement(
+                    si, "instrument-sound"
+                ).text = pdef.instrument_sound
+
+            midi_el = ET.SubElement(
+                sp, "midi-instrument", id=inst_id
+            )
+            ET.SubElement(
+                midi_el, "midi-channel"
+            ).text = str(i + 1)
+            ET.SubElement(
+                midi_el, "midi-program"
+            ).text = str(pdef.midi_program)
+
+            if (pdef.is_vocal and pdef.group_number > 0
+                    and pdef == vocal_parts[-1]):
+                ET.SubElement(
+                    part_list, "part-group",
+                    type="stop", number=str(pdef.group_number)
+                )
+
+        # --- Brace groups for grand staff parts ---
+        brace_parts = [p for p in parts_def if p.group_type == "brace"]
+        for bp in brace_parts:
+            # Part-group for brace is implicit via staves > 1
+            pass
+
+        # --- Parts with measures (assembled from multiple systems) ---
+        for pi, pdef in enumerate(parts_def):
+            part_el = ET.SubElement(root, "part", id=pdef.part_id)
+
+            # Collect all OMR scores for this part (one per system)
+            omr_results_for_part = part_omr_mapping.get(pi, [])
+
+            if not omr_results_for_part:
+                # Try fallback: direct key lookup in parsed_parts
+                key = tuple(pdef.staff_indices)
+                omr_score = parsed_parts.get(key)
+                if omr_score and list(omr_score.parts):
+                    self._fill_part_from_omr(
+                        part_el, pdef, omr_score, text_info
+                    )
+                else:
+                    self._fill_empty_part(part_el, pdef, text_info)
+                continue
+
+            # Parse OMR results, grouped by system
+            # Within same system, merge measures (e.g., treble+bass)
+            # Across systems, concatenate measures
+            system_groups = self._group_by_system(
+                omr_results_for_part, layout, all_page_layouts
+            )
+
+            # Collect measures with per-system metadata
+            # Each entry: (measure, time_sig_tuple, key_fifths)
+            all_measures_meta = []
+            for sys_key, sys_omr_list in system_groups:
+                sys_measures_list = []
+                # Collect ALL time/key sigs in this system for voting
+                sys_ts_candidates = []
+                sys_ks_candidates = []
+                for omr_dict in sys_omr_list:
+                    path = omr_dict.get("path", "")
+                    okey = tuple(omr_dict.get("staff_indices", []))
+                    omr_score = parsed_parts.get(okey)
+                    if omr_score is None and path and Path(path).exists():
+                        try:
+                            omr_score = converter.parse(path)
+                        except Exception:
+                            continue
+                    if omr_score and list(omr_score.parts):
+                        omr_part = list(omr_score.parts)[0]
+                        measures = list(
+                            omr_part.getElementsByClass("Measure")
+                        )
+                        sys_measures_list.append(measures)
+                        # Collect metadata for voting
+                        ts = list(omr_part.flatten()
+                                  .getElementsByClass(
+                                      "TimeSignature"))
+                        if ts:
+                            sys_ts_candidates.append((
+                                ts[0].numerator,
+                                ts[0].denominator
+                            ))
+                        ks = list(omr_part.flatten()
+                                  .getElementsByClass(
+                                      "KeySignature"))
+                        if ks:
+                            sys_ks_candidates.append(ks[0].sharps)
+
+                # Pick majority TS/KS weighted by measure count
+                # (OMR with more measures is more reliable)
+                sys_time_sig = None
+                if sys_ts_candidates:
+                    from collections import Counter
+                    # Weight by number of measures from each OMR
+                    ts_weights: Dict[tuple, int] = {}
+                    for i, ts_tuple in enumerate(sys_ts_candidates):
+                        n_measures = (
+                            len(sys_measures_list[i])
+                            if i < len(sys_measures_list) else 1
+                        )
+                        ts_weights[ts_tuple] = (
+                            ts_weights.get(ts_tuple, 0)
+                            + n_measures
+                        )
+                    sys_time_sig = max(
+                        ts_weights, key=ts_weights.get
+                    )
+
+                sys_key_fifths = None
+                if sys_ks_candidates:
+                    from collections import Counter
+                    ks_weights: Dict[int, int] = {}
+                    for i, ks_val in enumerate(sys_ks_candidates):
+                        n_measures = (
+                            len(sys_measures_list[i])
+                            if i < len(sys_measures_list) else 1
+                        )
+                        ks_weights[ks_val] = (
+                            ks_weights.get(ks_val, 0)
+                            + n_measures
+                        )
+                    sys_key_fifths = max(
+                        ks_weights, key=ks_weights.get
+                    )
+
+                if not sys_measures_list:
+                    continue
+
+                # Check for cross-system OMR results (brace spanning
+                # multiple systems). Split them at clef change points.
+                expanded_measures_list = []
+                for ml in sys_measures_list:
+                    split_result = self._split_cross_system_measures(
+                        ml
+                    )
+                    if len(split_result) > 1:
+                        # First part stays in this system,
+                        # remaining parts become additional systems
+                        expanded_measures_list.append(split_result[0])
+                        for extra_idx, extra_ml in enumerate(
+                            split_result[1:]
+                        ):
+                            # Determine metadata for the split part
+                            extra_ts = None
+                            extra_ks = None
+                            if extra_ml:
+                                ts_l = list(
+                                    extra_ml[0].flatten()
+                                    .getElementsByClass(
+                                        "TimeSignature"
+                                    )
+                                )
+                                if ts_l:
+                                    extra_ts = (
+                                        ts_l[0].numerator,
+                                        ts_l[0].denominator,
+                                    )
+                                ks_l = list(
+                                    extra_ml[0].flatten()
+                                    .getElementsByClass(
+                                        "KeySignature"
+                                    )
+                                )
+                                if ks_l:
+                                    extra_ks = ks_l[0].sharps
+                            # Queue extra measures for later
+                            for m in extra_ml:
+                                all_measures_meta.append(
+                                    (m, extra_ts or sys_time_sig,
+                                     extra_ks or sys_key_fifths)
+                                )
+                    else:
+                        expanded_measures_list.append(ml)
+                sys_measures_list = expanded_measures_list
+
+                # Merge or select measures for this system
+                if len(sys_measures_list) == 1:
+                    sys_merged = sys_measures_list[0]
+                elif pdef.num_staves > 1:
+                    sys_merged = self._merge_system_measures(
+                        sys_measures_list, pdef
+                    )
+                else:
+                    sys_merged = sys_measures_list[0]
+
+                # Tag each measure with system metadata
+                for m in sys_merged:
+                    all_measures_meta.append(
+                        (m, sys_time_sig, sys_key_fifths)
+                    )
+
+            if not all_measures_meta:
+                self._fill_empty_part(part_el, pdef, text_info)
+                continue
+
+            all_measures = [m for m, _, _ in all_measures_meta]
+
+            # Get time signature and key signature from first measure
+            # for anacrusis detection
+            first_ts = all_measures_meta[0][1]
+            first_ks = all_measures_meta[0][2]
+            expected_beats = (
+                first_ts[0] * (4.0 / first_ts[1])
+                if first_ts else 4.0
+            )
+
+            # Detect anacrusis
+            first_dur = all_measures[0].duration.quarterLength
+            is_anacrusis = first_dur < expected_beats * 0.9
+
+            # Write assembled measures
+            measure_number = 0 if is_anacrusis else 1
+
+            # Track current time/key sig for change detection
+            current_ts = first_ts
+            current_ks = first_ks
+
+            for m_idx, (m21_measure, m_ts, m_ks) in enumerate(
+                all_measures_meta
+            ):
+                attrs = {"number": str(measure_number)}
+                if m_idx == 0 and is_anacrusis:
+                    attrs["implicit"] = "yes"
+
+                measure_el = ET.SubElement(
+                    part_el, "measure", **attrs
+                )
+
+                # Detect time/key signature changes
+                ts_changed = (
+                    m_ts is not None
+                    and m_ts != current_ts
+                    and m_idx > 0
+                )
+                ks_changed = (
+                    m_ks is not None
+                    and m_ks != current_ks
+                    and m_idx > 0
+                )
+
+                # First measure or signature change: write attributes
+                if m_idx == 0 or ts_changed or ks_changed:
+                    attr_el = ET.SubElement(measure_el, "attributes")
+
+                    if m_idx == 0:
+                        ET.SubElement(
+                            attr_el, "divisions"
+                        ).text = str(self.DIVISIONS)
+
+                    # Key signature
+                    if m_idx == 0 or ks_changed:
+                        key_el = ET.SubElement(attr_el, "key")
+                        fifths = m_ks if m_ks is not None else 0
+                        ET.SubElement(
+                            key_el, "fifths"
+                        ).text = str(fifths)
+                        if ks_changed:
+                            current_ks = m_ks
+                            logger.info(
+                                f"Key change at measure "
+                                f"{measure_number}: "
+                                f"fifths={m_ks}"
+                            )
+
+                    # Time signature
+                    if m_idx == 0 or ts_changed:
+                        time_el = ET.SubElement(attr_el, "time")
+                        ts_to_write = m_ts or (4, 4)
+                        ET.SubElement(
+                            time_el, "beats"
+                        ).text = str(ts_to_write[0])
+                        ET.SubElement(
+                            time_el, "beat-type"
+                        ).text = str(ts_to_write[1])
+                        if ts_changed:
+                            current_ts = m_ts
+                            logger.info(
+                                f"Time sig change at measure "
+                                f"{measure_number}: "
+                                f"{m_ts[0]}/{m_ts[1]}"
+                            )
+
+                    # Staves (first measure only)
+                    if m_idx == 0 and pdef.num_staves > 1:
+                        ET.SubElement(
+                            attr_el, "staves"
+                        ).text = str(pdef.num_staves)
+
+                    # Clefs (first measure only)
+                    if m_idx == 0:
+                        for ci, clef_type in enumerate(pdef.clefs):
+                            clef_el = ET.SubElement(
+                                attr_el, "clef"
+                            )
+                            if pdef.num_staves > 1:
+                                clef_el.set(
+                                    "number", str(ci + 1)
+                                )
+                            if clef_type == "G":
+                                ET.SubElement(
+                                    clef_el, "sign"
+                                ).text = "G"
+                                ET.SubElement(
+                                    clef_el, "line"
+                                ).text = "2"
+                            elif clef_type == "F":
+                                ET.SubElement(
+                                    clef_el, "sign"
+                                ).text = "F"
+                                ET.SubElement(
+                                    clef_el, "line"
+                                ).text = "4"
+
+                    # Tempo (first measure only)
+                    if m_idx == 0 and text_info.tempo_markings:
+                        tempo_text = (
+                            text_info.tempo_markings[0]["text"]
+                        )
+                        tempo_match = re.search(
+                            r"(\d+)", tempo_text
+                        )
+                        if tempo_match:
+                            bpm = tempo_match.group(1)
+                            direction = ET.SubElement(
+                                measure_el, "direction",
+                                placement="above"
+                            )
+                            dir_type = ET.SubElement(
+                                direction, "direction-type"
+                            )
+                            metro = ET.SubElement(
+                                dir_type, "metronome"
+                            )
+                            ET.SubElement(
+                                metro, "beat-unit"
+                            ).text = "quarter"
+                            ET.SubElement(
+                                metro, "per-minute"
+                            ).text = bpm
+                            ET.SubElement(
+                                direction, "sound", tempo=bpm
+                            )
+
+                # Write notes
+                self._write_measure_notes(
+                    measure_el, m21_measure, pdef
+                )
+
+                measure_number += 1
+
+        return root
+
+    def _group_by_system(
+        self,
+        omr_results: List[dict],
+        layout: StaffLayout,
+        all_page_layouts: Optional[List[StaffLayout]],
+    ) -> List[Tuple[Tuple[int, int], List[dict]]]:
+        """Group OMR results by (page, system_index).
+
+        Returns list of ((page, sys_idx), [omr_dicts]) tuples,
+        ordered by page then system.
+        """
+        all_layouts = [layout]
+        if all_page_layouts:
+            all_layouts = all_page_layouts
+
+        groups: Dict[Tuple[int, int], List[dict]] = {}
+
+        for omr in omr_results:
+            page_idx = omr.get("page", 0)
+            local_indices = omr.get(
+                "original_staff_indices",
+                omr.get("staff_indices", [])
+            )
+
+            pg_layout = layout
+            if page_idx < len(all_layouts):
+                pg_layout = all_layouts[page_idx]
+
+            # Find which system this staff belongs to (majority overlap)
+            sys_idx = 0
+            best_overlap = 0
+            for si in pg_layout.systems:
+                overlap = sum(
+                    1 for i in local_indices
+                    if i in si.staff_indices
+                )
+                if overlap > best_overlap:
+                    best_overlap = overlap
+                    sys_idx = si.system_index
+
+            key = (page_idx, sys_idx)
+            if key not in groups:
+                groups[key] = []
+            groups[key].append(omr)
+
+        # Return sorted by key
+        return sorted(groups.items(), key=lambda x: x[0])
+
+    def _split_cross_system_measures(
+        self,
+        measures: List,
+    ) -> List[List]:
+        """Detect if a measure list spans multiple systems via clef change.
+
+        When homr processes a brace image that spans system boundaries,
+        it produces measures with a clef change (e.g., F→G) at the
+        system break point. Detect this and split the measures.
+
+        Returns a list of measure-sublists (one per detected system).
+        """
+        if len(measures) <= 2:
+            return [measures]
+
+        # Track clef changes across measures
+        current_clef = None
+        split_points = []
+
+        for m_idx, m in enumerate(measures):
+            clefs = list(m.flatten().getElementsByClass(clef.Clef))
+            if clefs:
+                clef_sign = clefs[0].sign
+                if current_clef is not None and clef_sign != current_clef:
+                    # Clef changed — likely a system break
+                    split_points.append(m_idx)
+                    logger.info(
+                        f"Detected cross-system break at measure "
+                        f"{m_idx}: clef {current_clef} → {clef_sign}"
+                    )
+                current_clef = clef_sign
+
+        if not split_points:
+            return [measures]
+
+        # Split at the detected points
+        result = []
+        prev = 0
+        for sp in split_points:
+            if sp > prev:
+                result.append(measures[prev:sp])
+            prev = sp
+        if prev < len(measures):
+            result.append(measures[prev:])
+
+        return result
+
+    def _merge_system_measures(
+        self,
+        measures_list: List[List],
+        pdef: PartDefinition,
+    ) -> List:
+        """Merge measures from multiple staves in the same system.
+
+        For a grand-staff part, stave 1 (treble) and stave 2 (bass)
+        are separate OMR results. Their measures at the same index
+        should be combined into one measure with notes from both staves.
+
+        Args:
+            measures_list: List of measure-lists (one per staff OMR)
+            pdef: Part definition
+
+        Returns:
+            Single list of merged measures
+        """
+        if len(measures_list) == 1:
+            return measures_list[0]
+
+        # Find the longest measure list
+        max_len = max(len(ml) for ml in measures_list)
+
+        merged = []
+        for m_idx in range(max_len):
+            # Collect all measures at this index
+            source_measures = []
+            for ml in measures_list:
+                if m_idx < len(ml):
+                    source_measures.append(ml[m_idx])
+
+            if len(source_measures) == 1:
+                merged.append(source_measures[0])
+            else:
+                # Merge notes from all source measures into one
+                combined = self._combine_measures(
+                    source_measures, pdef
+                )
+                merged.append(combined)
+
+        return merged
+
+    def _combine_measures(
+        self,
+        measures: List,
+        pdef: PartDefinition,
+    ):
+        """Combine notes from multiple measures into one.
+
+        Creates a new music21 Measure with all notes and rests
+        from the input measures. For grand staff, keeps staff
+        assignment based on pitch.
+        """
+        from music21 import stream as m21stream
+
+        combined = m21stream.Measure()
+
+        # Copy metadata from first measure
+        first = measures[0]
+        if hasattr(first, 'timeSignature') and first.timeSignature:
+            combined.timeSignature = first.timeSignature
+        if hasattr(first, 'keySignature') and first.keySignature:
+            combined.keySignature = first.keySignature
+
+        # Collect all notes and rests from all measures
+        for measure in measures:
+            for elem in measure.flatten().notesAndRests:
+                try:
+                    imported = elem.__deepcopy__()
+                    combined.insert(
+                        float(elem.offset), imported
+                    )
+                except Exception:
+                    pass
+
+        return combined
 
     def _build_musicxml(
         self,

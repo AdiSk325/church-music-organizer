@@ -110,6 +110,8 @@ class StaffSplitter:
 
         Grand staff staves (brace) are cut together.
         Other staves are cut individually.
+        Brace groups are validated against system boundaries —
+        staves from different systems are never grouped together.
         """
         if not layout.systems:
             # No system info — cut each staff individually
@@ -118,66 +120,52 @@ class StaffSplitter:
                 for s in layout.staves
             ]
 
-        # Work with the first system to determine the pattern
-        first_system = layout.systems[0]
-        system_indices = set(first_system.staff_indices)
-
-        # Find which staves are in brace groups (grand staff)
-        braced = set()
-        brace_groups = []
-        for g in layout.groups:
-            if g.group_type == "brace":
-                for idx in g.staff_indices:
-                    if idx in system_indices:
-                        braced.add(idx)
-                brace_groups.append(g)
-
         cuts = []
 
-        # Process staves in order
-        processed = set()
-        for idx in sorted(first_system.staff_indices):
-            if idx in processed:
-                continue
+        for sys in layout.systems:
+            system_indices = set(sys.staff_indices)
 
-            # Check if this staff is part of a brace group
-            in_brace = None
-            for bg in brace_groups:
-                if idx in bg.staff_indices:
-                    in_brace = bg
-                    break
+            # Find brace groups within THIS system only
+            braced = set()
+            brace_groups_in_system = []
+            for g in layout.groups:
+                if g.group_type == "brace":
+                    # Only include staves that are in this system
+                    group_in_sys = [
+                        idx for idx in g.staff_indices
+                        if idx in system_indices
+                    ]
+                    if len(group_in_sys) >= 2:
+                        brace_groups_in_system.append(group_in_sys)
+                        for idx in group_in_sys:
+                            braced.add(idx)
 
-            if in_brace:
-                cuts.append({
-                    "staff_indices": sorted(in_brace.staff_indices),
-                    "group_type": "brace",
-                })
-                for si in in_brace.staff_indices:
-                    processed.add(si)
-            else:
-                cuts.append({
-                    "staff_indices": [idx],
-                    "group_type": "single",
-                })
-                processed.add(idx)
+            # Process staves in order within this system
+            processed = set()
+            for idx in sorted(sys.staff_indices):
+                if idx in processed:
+                    continue
 
-        # Replicate pattern for subsequent systems
-        if len(layout.systems) > 1:
-            pattern_len = len(first_system.staff_indices)
-            for sys in layout.systems[1:]:
-                # Map by offset
-                for cut in cuts[:]:  # iterate over pattern
-                    offset_indices = []
-                    for ci in cut["staff_indices"]:
-                        offset = ci - first_system.staff_indices[0]
-                        new_idx = sys.staff_indices[0] + offset
-                        if new_idx in set(sys.staff_indices):
-                            offset_indices.append(new_idx)
-                    if offset_indices:
-                        cuts.append({
-                            "staff_indices": offset_indices,
-                            "group_type": cut["group_type"],
-                        })
+                # Check if this staff is part of a brace group
+                in_brace = None
+                for bg_indices in brace_groups_in_system:
+                    if idx in bg_indices:
+                        in_brace = bg_indices
+                        break
+
+                if in_brace:
+                    cuts.append({
+                        "staff_indices": sorted(in_brace),
+                        "group_type": "brace",
+                    })
+                    for si in in_brace:
+                        processed.add(si)
+                else:
+                    cuts.append({
+                        "staff_indices": [idx],
+                        "group_type": "single",
+                    })
+                    processed.add(idx)
 
         return cuts
 

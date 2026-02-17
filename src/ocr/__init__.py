@@ -9,19 +9,45 @@ Provides a comprehensive OMR (Optical Music Recognition) pipeline:
   - Lyrics alignment from PDF text layer
 """
 
-from .sheet_music_ocr import SheetMusicOCR
-from .musicxml_converter import MusicXMLConverter
-from .pdf_text_extractor import PDFTextExtractor, LyricsData
+# Legacy modules — optional, may require pytesseract
+try:
+    from .sheet_music_ocr import SheetMusicOCR
+except ImportError:
+    SheetMusicOCR = None
+
+try:
+    from .musicxml_converter import MusicXMLConverter
+except ImportError:
+    MusicXMLConverter = None
+
+try:
+    from .pdf_text_extractor import PDFTextExtractor, LyricsData
+except ImportError:
+    PDFTextExtractor = None
+    LyricsData = None
+
+try:
+    from .score_analyzer import ScoreAnalyzer, ScoreMetadata
+except ImportError:
+    ScoreAnalyzer = None
+    ScoreMetadata = None
+
+try:
+    from .voice_detector import VoiceDetector, VoiceDetectionResult
+except ImportError:
+    VoiceDetector = None
+    VoiceDetectionResult = None
+
+# Core pipeline modules
 from .omr_engine import OMREngine, OMRResult, OMREngineType, get_engine, get_best_available_engine
 from .preprocessing import ImagePreprocessor
-from .score_analyzer import ScoreAnalyzer, ScoreMetadata
 from .musicxml_validator import MusicXMLValidator, ValidationReport
-from .voice_detector import VoiceDetector, VoiceDetectionResult
 from .lyrics_aligner import LyricsAligner
 from .text_classifier import TextClassifier, ClassifiedText
 from .staff_detector import StaffDetector, StaffLayout
 from .staff_splitter import StaffSplitter
 from .score_builder import ScoreBuilder
+from .omr_postprocessor import OMRPostProcessor, PostProcessingReport
 
 __all__ = [
     # Legacy
@@ -56,4 +82,7 @@ __all__ = [
     'StaffLayout',
     'StaffSplitter',
     'ScoreBuilder',
+    # Post-processing
+    'OMRPostProcessor',
+    'PostProcessingReport',
 ]
