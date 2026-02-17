@@ -49,7 +49,9 @@ def get_file_type(filename: str) -> FileType:
         return FileType.MUSESCORE
     elif ext == '.pdf':
         return FileType.PDF
-    elif ext in ['.xml', '.musicxml']:
+    elif ext in ['.musicxml', '.mxl']:
+        return FileType.MUSICXML
+    elif ext == '.xml':
         return FileType.XML
     elif ext in ['.txt', '.ly']:
         return FileType.TEXT
