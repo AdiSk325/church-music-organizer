@@ -1,257 +1,280 @@
 """Music notation converter for converting OCR results to MusicXML.
 
-Produces MusicXML files that can be directly imported and edited in MuseScore.
+Creates MusicXML files with lyrics that can be opened in MuseScore.
 """
 
 import logging
-import shutil
-import subprocess
+import re
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List
 
-from music21 import key as m21key
-from music21 import metadata, meter, note, stream
+from music21 import (
+    converter, metadata, stream, note, meter,
+    key, tempo, clef, instrument, expressions
+)
+from music21.note import Lyric
+
+from .pdf_text_extractor import LyricsData
 
 logger = logging.getLogger(__name__)
 
 
 class MusicXMLConverter:
-    """Converter for music notation to MusicXML format."""
-
+    """Converter for music notation to MusicXML format.
+    
+    Creates MusicXML scores with lyrics attached to notes,
+    suitable for import into MuseScore.
+    """
+    
     def __init__(self, output_dir: str = "data/processed"):
         """Initialize MusicXML converter.
-
+        
         Args:
             output_dir: Directory to store converted files
         """
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
-
-    def create_from_metadata(
-        self,
-        title: str,
-        composer: str = None,
-        key: str = None,
-        time_sig: str = None,
-    ) -> stream.Score:
+    
+    def create_from_metadata(self, title: str, composer: str = None, 
+                           key_sig: str = None, time_sig: str = None) -> stream.Score:
         """Create a basic MusicXML score from metadata.
-
+        
         Args:
             title: Title of the piece
             composer: Composer name
-            key: Key signature (e.g. "C major", "D minor")
-            time_sig: Time signature (e.g. "4/4", "3/4")
-
+            key_sig: Key signature (e.g., 'A major', 'D minor')
+            time_sig: Time signature (e.g., '4/4', '3/4')
+            
         Returns:
             music21 Score object
         """
         score = stream.Score()
-
+        
         # Add metadata
         score.metadata = metadata.Metadata()
         score.metadata.title = title
         if composer:
             score.metadata.composer = composer
-
-        # Create a part with a single empty measure
+        
+        # Create a part with voice instrument
         part = stream.Part()
         part.partName = "Voice"
-
-        m = stream.Measure(number=1)
-
-        # Key signature
-        if key:
-            try:
-                ks = m21key.Key(key)
-                m.insert(0, ks)
-            except Exception:
-                logger.debug("Could not parse key signature: %s", key)
-
-        # Time signature
+        vocal = instrument.Vocalist()
+        part.insert(0, vocal)
+        
+        # Add clef
+        part.insert(0, clef.TrebleClef())
+        
+        # Add time signature
         if time_sig:
-            try:
-                ts = meter.TimeSignature(time_sig)
-                m.insert(0, ts)
-            except Exception:
-                logger.debug("Could not parse time signature: %s", time_sig)
-
-        # One whole rest so MuseScore opens the file cleanly
-        r = note.Rest(quarterLength=4.0)
-        m.append(r)
-
-        part.append(m)
-        score.append(part)
-
-        return score
-
-    def create_score_with_lyrics(
-        self,
-        title: str,
-        composer: Optional[str] = None,
-        lyrics: Optional[str] = None,
-        key_sig: Optional[str] = None,
-        time_sig: Optional[str] = None,
-    ) -> stream.Score:
-        """Create a MusicXML score with lyrics attached as text.
-
-        The generated score contains a single voice part with placeholder notes.
-        Lyrics are split by whitespace and attached syllable-by-syllable so that
-        MuseScore displays them underneath the staff.  This allows the user to
-        add the actual melody while keeping the lyrics aligned.
-
-        Args:
-            title: Title of the piece.
-            composer: Optional composer name.
-            lyrics: Optional lyrics text extracted from the scan.
-            key_sig: Optional key signature string (e.g. "C major").
-            time_sig: Optional time signature string (e.g. "4/4").
-
-        Returns:
-            A music21 Score object ready to be written as MusicXML.
-        """
-        score = stream.Score()
-        score.metadata = metadata.Metadata()
-        score.metadata.title = title
-        if composer:
-            score.metadata.composer = composer
-
-        part = stream.Part()
-        part.partName = "Voice"
-
-        measure_num = 1
-        first_measure = stream.Measure(number=measure_num)
-
-        # Key signature
+            ts = meter.TimeSignature(time_sig)
+        else:
+            ts = meter.TimeSignature('4/4')
+        part.insert(0, ts)
+        
+        # Add key signature if provided
         if key_sig:
             try:
-                ks = m21key.Key(key_sig)
-                first_measure.insert(0, ks)
+                ks = key.Key(key_sig)
+                part.insert(0, ks)
             except Exception:
                 pass
-
-        # Time signature
-        ts_obj = None
-        if time_sig:
-            try:
-                ts_obj = meter.TimeSignature(time_sig)
-                first_measure.insert(0, ts_obj)
-            except Exception:
-                pass
-
-        beats_per_measure = ts_obj.numerator if ts_obj else 4
-
-        if lyrics and lyrics.strip():
-            syllables = lyrics.split()
-            current_measure = first_measure
-            beat = 0
-
-            for syllable in syllables:
-                if beat >= beats_per_measure:
-                    part.append(current_measure)
-                    measure_num += 1
-                    current_measure = stream.Measure(number=measure_num)
-                    beat = 0
-
-                n = note.Note("C4", quarterLength=1.0)
-                n.lyric = syllable
-                current_measure.append(n)
-                beat += 1
-
-            # Pad remaining beats in last measure with rests
-            if beat < beats_per_measure:
-                r = note.Rest(quarterLength=float(beats_per_measure - beat))
-                current_measure.append(r)
-            part.append(current_measure)
-        else:
-            # Empty measure with a whole rest
-            r = note.Rest(quarterLength=4.0)
-            first_measure.append(r)
-            part.append(first_measure)
-
+        
         score.append(part)
         return score
+
+    def create_score_with_lyrics(self, lyrics_data: LyricsData,
+                                  time_sig: str = '4/4',
+                                  key_sig: str = 'A',
+                                  default_pitch: str = 'A4',
+                                  note_duration: float = 1.0) -> stream.Score:
+        """Create a MusicXML score with lyrics attached to notes.
+        
+        Each syllable is assigned to a note. Since we only have lyrics
+        (not actual pitches from the PDF), placeholder notes are used
+        at a default pitch. The user can then edit pitches in MuseScore
+        while keeping the lyric alignment.
+        
+        Args:
+            lyrics_data: LyricsData object with extracted lyrics
+            time_sig: Time signature string (default: '4/4')
+            key_sig: Key signature (default: 'A' for A major - matches Panis Angelicus)
+            default_pitch: Default pitch for placeholder notes
+            note_duration: Duration of each note in quarter lengths
+            
+        Returns:
+            music21 Score object with lyrics
+        """
+        # Create score with metadata
+        title = lyrics_data.title or "Untitled"
+        composer = lyrics_data.composer or ""
+        
+        score = self.create_from_metadata(
+            title=title,
+            composer=composer,
+            key_sig=key_sig,
+            time_sig=time_sig
+        )
+        
+        part = score.parts[0]
+        
+        # Add tempo marking if available
+        if lyrics_data.tempo_marking:
+            tempo_text = expressions.TextExpression(lyrics_data.tempo_marking)
+            part.insert(0, tempo_text)
+        
+        # Parse time signature to know beats per measure
+        ts = meter.TimeSignature(time_sig)
+        beats_per_measure = ts.numerator
+        beat_type = ts.denominator
+        
+        # Calculate how many notes fit per measure
+        # note_duration is in quarter-note lengths
+        notes_per_measure = int(beats_per_measure * (4.0 / beat_type) / note_duration)
+        if notes_per_measure < 1:
+            notes_per_measure = 1
+        
+        # Create notes with lyrics
+        syllables = lyrics_data.syllables
+        if not syllables:
+            logger.warning("No syllables to add to score")
+            return score
+        
+        current_measure = stream.Measure(number=1)
+        measure_num = 1
+        note_count_in_measure = 0
+        
+        for i, syllable in enumerate(syllables):
+            # Create a note
+            n = note.Note(default_pitch)
+            n.duration.quarterLength = note_duration
+            
+            # Determine syllabic type for proper MusicXML lyric rendering
+            syllabic = self._get_syllabic_type(syllable, syllables, i)
+            
+            # Clean the syllable text (remove trailing hyphens for display)
+            clean_syllable = syllable.rstrip('-')
+            
+            # Add lyric to note
+            lyric = Lyric()
+            lyric.text = clean_syllable
+            lyric.number = 1
+            lyric.syllabic = syllabic
+            n.lyrics.append(lyric)
+            
+            # Add note to current measure
+            current_measure.append(n)
+            note_count_in_measure += 1
+            
+            # Start new measure when full
+            if note_count_in_measure >= notes_per_measure:
+                part.append(current_measure)
+                measure_num += 1
+                current_measure = stream.Measure(number=measure_num)
+                note_count_in_measure = 0
+        
+        # Append the last measure if it has notes
+        if note_count_in_measure > 0:
+            # Pad with rests if needed
+            remaining = notes_per_measure - note_count_in_measure
+            for _ in range(remaining):
+                r = note.Rest()
+                r.duration.quarterLength = note_duration
+                current_measure.append(r)
+            part.append(current_measure)
+        
+        logger.info(
+            f"Created score '{title}' with {len(syllables)} syllables "
+            f"across {measure_num} measures"
+        )
+        return score
+
+    def _get_syllabic_type(self, syllable: str, all_syllables: List[str], index: int) -> str:
+        """Determine the syllabic type for MusicXML lyric rendering.
+        
+        Args:
+            syllable: Current syllable
+            all_syllables: All syllables list
+            index: Current index
+            
+        Returns:
+            Syllabic type: 'single', 'begin', 'middle', or 'end'
+        """
+        ends_with_hyphen = syllable.endswith('-')
+        
+        # Check if previous syllable had a hyphen (meaning this continues a word)
+        prev_had_hyphen = False
+        if index > 0:
+            prev_had_hyphen = all_syllables[index - 1].endswith('-')
+        
+        if prev_had_hyphen and ends_with_hyphen:
+            return 'middle'
+        elif prev_had_hyphen and not ends_with_hyphen:
+            return 'end'
+        elif not prev_had_hyphen and ends_with_hyphen:
+            return 'begin'
+        else:
+            return 'single'
 
     def save_as_musicxml(self, score: stream.Score, output_path: str) -> bool:
         """Save a music21 Score as MusicXML.
-
+        
         Args:
             score: music21 Score object
             output_path: Path to save the MusicXML file
-
+            
         Returns:
             True if successful, False otherwise
         """
         try:
-            score.write("musicxml", fp=output_path)
-            logger.info("MusicXML saved to %s", output_path)
+            output_path = str(output_path)
+            # Ensure .musicxml extension for MuseScore compatibility
+            if not output_path.endswith(('.xml', '.musicxml')):
+                output_path += '.musicxml'
+            
+            Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+            score.write('musicxml', fp=output_path)
+            logger.info(f"MusicXML saved to {output_path}")
             return True
         except Exception as e:
-            logger.error("Error saving MusicXML to %s: %s", output_path, e)
+            logger.error(f"Error saving MusicXML to {output_path}: {str(e)}")
             return False
-
-    def validate_musicxml(self, musicxml_path: str) -> bool:
-        """Validate that a MusicXML file can be parsed by music21.
-
-        Args:
-            musicxml_path: Path to the MusicXML file.
-
-        Returns:
-            True if the file is valid MusicXML.
-        """
-        try:
-            from music21 import converter
-
-            parsed = converter.parse(musicxml_path)
-            return parsed is not None
-        except Exception as e:
-            logger.error("MusicXML validation failed for %s: %s", musicxml_path, e)
-            return False
-
+    
     def convert_to_musescore(self, musicxml_path: str, output_path: str) -> bool:
         """Convert MusicXML to MuseScore format.
-
-        Tries common MuseScore CLI names: ``mscore``, ``musescore``,
-        ``musescore4``, ``MuseScore4``.
-
+        
+        Note: This requires MuseScore to be installed and available in PATH.
+        
         Args:
             musicxml_path: Path to the MusicXML file
-            output_path: Path to save the MuseScore file (.mscz)
-
+            output_path: Path to save the MuseScore file
+            
         Returns:
             True if successful, False otherwise
         """
-        candidates = ["mscore", "musescore", "musescore4", "MuseScore4"]
-        exe = None
-        for name in candidates:
-            if shutil.which(name):
-                exe = name
-                break
-
-        if exe is None:
-            logger.warning(
-                "MuseScore not found in PATH (tried %s). "
-                "The MusicXML file can be imported manually.",
-                ", ".join(candidates),
-            )
-            return False
-
         try:
-            result = subprocess.run(
-                [exe, musicxml_path, "-o", output_path],
-                capture_output=True,
-                text=True,
-                timeout=60,
-            )
-
-            if result.returncode == 0:
-                logger.info("MuseScore file saved to %s", output_path)
-                return True
-            else:
-                logger.error("MuseScore conversion failed: %s", result.stderr)
-                return False
-        except subprocess.TimeoutExpired:
-            logger.warning("MuseScore conversion timed out.")
+            import subprocess
+            
+            # Try common MuseScore executable names
+            mscore_names = ['musescore', 'MuseScore4', 'MuseScore3', 'mscore']
+            
+            for mscore in mscore_names:
+                try:
+                    result = subprocess.run(
+                        [mscore, musicxml_path, '-o', output_path],
+                        capture_output=True,
+                        text=True,
+                        timeout=30
+                    )
+                    
+                    if result.returncode == 0:
+                        logger.info(f"MuseScore file saved to {output_path}")
+                        return True
+                except FileNotFoundError:
+                    continue
+            
+            logger.warning("MuseScore not found in PATH. Skipping conversion.")
             return False
         except Exception as e:
-            logger.error("Error converting to MuseScore: %s", e)
+            logger.error(f"Error converting to MuseScore: {str(e)}")
             return False
