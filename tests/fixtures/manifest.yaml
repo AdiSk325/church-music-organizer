@@ -1,0 +1,24 @@
+# tests/fixtures/manifest.yaml
+# Master registry of all test cases.
+# Human maintains this file.
+
+test_cases:
+  - id: "alleluja_sw_anna"
+    path: "Alleluja_werset_sw_Anna"
+    status: "active"        # active | wip | disabled
+    priority: 1             # 1 = must pass, 2 = should pass, 3 = aspirational
+
+  - id: "boze_moj"
+    path: "Boze_moj"
+    status: "active"
+    priority: 1
+
+  - id: "do_jana_kantego"
+    path: "do_Jana_Kantego"
+    status: "active"
+    priority: 2             # multi-page, harder
+
+  - id: "psalm_adwent"
+    path: "psalm_adwent"
+    status: "wip"
+    priority: 2

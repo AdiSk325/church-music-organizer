@@ -1,0 +1,130 @@
+# case.yaml for: Psalmy responsoryjne
+# Auto-generated from expected_final.musicxml
+# Review and adjust values marked with TODO
+
+id: psalm_adwent
+title: Psalmy responsoryjne
+source: input.png
+difficulty: easy
+tags:
+- organ
+- polish_text
+notes: Organo (G/F, 2 staves), 1 page(s), 10 measures
+
+# ── Step 1: Ingestion ──────────────────────────────
+step_01_ingestion:
+  expected_pages: 1
+  expected_dpi: 300
+  has_text_layer: false
+
+# ── Step 2: Preprocessing ──────────────────────────
+step_02_preprocessing:
+  expected_pages: 1
+
+# ── Step 3: Text Classification ────────────────────
+step_03_text:
+  title: Psalmy responsoryjne
+  subtitle: null
+  composer: null
+  arranger: null
+  part_names: &id001
+  - Organo
+  has_lyrics: true
+  lyrics_snippet: Al le lu ja, Al le lu ja.
+  tempo: null
+
+# ── Step 4: Staff Detection ───────────────────────
+step_04_layout:
+  pages:
+  - page: 1
+    staff_count: 2
+    groups: []
+    systems: 2
+    measures: 1-10
+
+# ── Step 5: Staff Splitting ───────────────────────
+step_05_splitting:
+  expected_images: 1
+  splits:
+  - group_type: brace
+    parts:
+    - Organo
+
+# ── Step 6: OMR per Staff ─────────────────────────
+step_06_omr:
+  staves:
+  - label: Organo
+    clef:
+    - G
+    - F
+    key_signature: -3
+    time_signature: 4/4
+    expected_measures: 10
+    expected_note_count:
+    - 144
+    - 177
+    pitch_range_midi:
+    - 43
+    - 72
+    lyric_verses: 1
+    has_ties: true
+    staves_in_part: 2
+    voices:
+    - '1'
+    - '2'
+    - '5'
+    - '6'
+
+# ── Step 7: Score Assembly ────────────────────────
+step_07_assembly:
+  expected_parts: 1
+  part_names: *id001
+  grouping: []
+  total_measures: 10
+  beats_per_measure: 4.0
+
+# ── Step 8: Lyrics ────────────────────────────────
+step_08_lyrics:
+  vocal_parts:
+  - Organo
+  non_vocal_parts: []
+  expected_syllable_count:
+  - 6
+  - 9
+
+# ── Step 9: Validation ───────────────────────────
+step_09_validation:
+  max_beat_errors: 0
+  max_ambitus_warnings: 5
+  expected_key_consistency: true
+  expected_part_length_match: true
+
+# ── Step 10: Final Output ────────────────────────
+step_10_final:
+  ground_truth_file: expected_final.musicxml
+  min_pitch_accuracy: 0.8
+  min_duration_accuracy: 0.8
+  min_measure_count_accuracy: 1.0
+  min_part_count_accuracy: 1.0
+
+
+# ── Extracted Details (for reference, not used by tests) ──
+# per_part:
+#   Organo:
+#     note_count: 161
+#     rest_count: 0
+#     voices:
+#     - '1'
+#     - '2'
+#     - '5'
+#     - '6'
+#     staves_count: 2
+#     has_ties: true
+#     has_chords: false
+#     has_dots: true
+#     directions:
+#     - measure: 1
+#       text: Okres Adwentu
+#     - measure: 7
+#       text: '[PDS 171]'
+#     lyric_verse_count: 1

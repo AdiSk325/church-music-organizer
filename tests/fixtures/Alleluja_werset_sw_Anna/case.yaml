@@ -1,0 +1,186 @@
+# case.yaml for: Alleluja - werset
+# Auto-generated from expected_final.musicxml
+# Review and adjust values marked with TODO
+
+id: alleluja_werset_sw_anna
+title: Alleluja - werset
+source: input.pdf
+difficulty: easy
+tags:
+- satb
+- organ
+- polish_text
+notes: S A (G) + T B (F) + Organo (G/F, 2 staves), 1 page(s), 6 measures
+
+# ── Step 1: Ingestion ──────────────────────────────
+step_01_ingestion:
+  expected_pages: 1
+  expected_dpi: 300
+  has_text_layer: true
+
+# ── Step 2: Preprocessing ──────────────────────────
+step_02_preprocessing:
+  expected_pages: 1
+
+# ── Step 3: Text Classification ────────────────────
+step_03_text:
+  title: Alleluja - werset
+  subtitle: null
+  composer: null
+  arranger: null
+  part_names: &id002
+  - S A
+  - T B
+  - Organo
+  has_lyrics: true
+  lyrics_snippet: Jawicie się jako źródła świa tła w świe cie, Trzymając się mocno Sło wa Ży cia.
+  tempo: null
+
+# ── Step 4: Staff Detection ───────────────────────
+step_04_layout:
+  pages:
+  - page: 1
+    staff_count: 4
+    groups:
+    - type: bracket
+      parts: &id001
+      - S A
+      - T B
+    systems: 2
+    measures: 1-5
+
+# ── Step 5: Staff Splitting ───────────────────────
+step_05_splitting:
+  expected_images: 1
+  splits:
+  - group_type: bracket
+    parts: *id001
+
+# ── Step 6: OMR per Staff ─────────────────────────
+step_06_omr:
+  staves:
+  - label: S A
+    clef: G
+    key_signature: 0
+    time_signature: 4/4
+    expected_measures: 6
+    expected_note_count:
+    - 19
+    - 24
+    pitch_range_midi:
+    - 60
+    - 72
+    lyric_verses: 1
+    has_ties: true
+  - label: T B
+    clef: F
+    key_signature: 0
+    time_signature: 4/4
+    expected_measures: 6
+    expected_note_count:
+    - 18
+    - 23
+    pitch_range_midi:
+    - 48
+    - 60
+    has_ties: true
+  - label: Organo
+    clef:
+    - G
+    - F
+    key_signature: 0
+    time_signature: 4/4
+    expected_measures: 6
+    expected_note_count:
+    - 43
+    - 52
+    pitch_range_midi:
+    - 41
+    - 72
+    has_ties: true
+    staves_in_part: 2
+    voices:
+    - '1'
+    - '2'
+    - '5'
+    - '6'
+
+# ── Step 7: Score Assembly ────────────────────────
+step_07_assembly:
+  expected_parts: 3
+  part_names: *id002
+  grouping:
+  - type: bracket
+    parts: *id001
+  total_measures: 6
+  beats_per_measure: 4.0
+
+# ── Step 8: Lyrics ────────────────────────────────
+step_08_lyrics:
+  vocal_parts:
+  - S A
+  non_vocal_parts:
+  - T B
+  - Organo
+  expected_syllable_count:
+  - 8
+  - 12
+
+# ── Step 9: Validation ───────────────────────────
+step_09_validation:
+  max_beat_errors: 0
+  max_ambitus_warnings: 5
+  expected_key_consistency: true
+  expected_part_length_match: true
+
+# ── Step 10: Final Output ────────────────────────
+step_10_final:
+  ground_truth_file: expected_final.musicxml
+  min_pitch_accuracy: 0.8
+  min_duration_accuracy: 0.8
+  min_measure_count_accuracy: 1.0
+  min_part_count_accuracy: 1.0
+
+
+# ── Extracted Details (for reference, not used by tests) ──
+# per_part:
+#   S A:
+#     note_count: 22
+#     rest_count: 4
+#     voices:
+#     - '1'
+#     - '2'
+#     staves_count: 1
+#     has_ties: true
+#     has_chords: false
+#     has_dots: false
+#     directions: []
+#     lyric_verse_count: 1
+#   T B:
+#     note_count: 21
+#     rest_count: 4
+#     voices:
+#     - '1'
+#     - '2'
+#     staves_count: 1
+#     has_ties: true
+#     has_chords: true
+#     has_dots: false
+#     directions: []
+#     lyric_verse_count: 0
+#   Organo:
+#     note_count: 48
+#     rest_count: 4
+#     voices:
+#     - '1'
+#     - '2'
+#     - '5'
+#     - '6'
+#     staves_count: 2
+#     has_ties: true
+#     has_chords: false
+#     has_dots: false
+#     directions:
+#     - measure: 2
+#       text: Wstęp
+#     lyric_verse_count: 0

@@ -1,0 +1,151 @@
+# case.yaml for: Osobliwy i prawdziwy
+# Auto-generated from expected_final.musicxml
+# Review and adjust values marked with TODO
+
+id: do_jana_kantego
+title: Osobliwy i prawdziwy
+source: input.pdf
+difficulty: medium
+tags:
+- organ
+- multi_page
+- polish_text
+- repeat
+notes: Organo (G/F/F, 3 staves), 2 page(s), 22 measures
+
+# ── Step 1: Ingestion ──────────────────────────────
+step_01_ingestion:
+  expected_pages: 2
+  expected_dpi: 300
+  has_text_layer: true
+
+# ── Step 2: Preprocessing ──────────────────────────
+step_02_preprocessing:
+  expected_pages: 2
+
+# ── Step 3: Text Classification ────────────────────
+step_03_text:
+  title: Osobliwy i prawdziwy
+  subtitle: św. Jana Kantego, prezbitera 20 października
+  composer: 'h.: A. Skutnik'
+  arranger: null
+  part_names: &id001
+  - Organo
+  has_lyrics: true
+  lyrics_snippet: O so bli wy i praw dzi wy, * Czy sty
+  tempo: null
+
+# ── Step 4: Staff Detection ───────────────────────
+step_04_layout:
+  pages:
+  - page: 1
+    staff_count: 3
+    groups: []
+    systems: 2
+    measures: 1-12
+  - page: 2
+    staff_count: 3
+    groups: []
+    systems: 2
+    measures: 13-22
+
+# ── Step 5: Staff Splitting ───────────────────────
+step_05_splitting:
+  expected_images: 1
+  splits:
+  - group_type: brace
+    parts:
+    - Organo
+
+# ── Step 6: OMR per Staff ─────────────────────────
+step_06_omr:
+  staves:
+  - label: Organo
+    clef:
+    - G
+    - F
+    - F
+    key_signature: -1
+    time_signature: 3/4
+    expected_measures: 22
+    expected_note_count:
+    - 165
+    - 202
+    pitch_range_midi:
+    - 38
+    - 74
+    lyric_verses: 3
+    has_ties: true
+    staves_in_part: 3
+    voices:
+    - '1'
+    - '2'
+    - '5'
+    - '6'
+    - '9'
+
+# ── Step 7: Score Assembly ────────────────────────
+step_07_assembly:
+  expected_parts: 1
+  part_names: *id001
+  grouping: []
+  total_measures: 22
+  beats_per_measure: 3.0
+  repeat_barlines:
+  - measure: 13
+    direction: forward
+    location: left
+  - measure: 16
+    direction: backward
+    location: right
+
+# ── Step 8: Lyrics ────────────────────────────────
+step_08_lyrics:
+  vocal_parts:
+  - Organo
+  non_vocal_parts: []
+  expected_syllable_count:
+  - 31
+  - 46
+
+# ── Step 9: Validation ───────────────────────────
+step_09_validation:
+  max_beat_errors: 0
+  max_ambitus_warnings: 5
+  expected_key_consistency: true
+  expected_part_length_match: true
+
+# ── Step 10: Final Output ────────────────────────
+step_10_final:
+  ground_truth_file: expected_final.musicxml
+  min_pitch_accuracy: 0.8
+  min_duration_accuracy: 0.8
+  min_measure_count_accuracy: 1.0
+  min_part_count_accuracy: 1.0
+
+
+# ── Extracted Details (for reference, not used by tests) ──
+# per_part:
+#   Organo:
+#     note_count: 184
+#     rest_count: 29
+#     voices:
+#     - '1'
+#     - '2'
+#     - '5'
+#     - '6'
+#     - '9'
+#     staves_count: 3
+#     has_ties: true
+#     has_chords: false
+#     has_dots: true
+#     directions:
+#     - measure: 13
+#       text: Przezacna perło
+#     - measure: 15
+#       text: św. Jana Kantego, prezbitera
+#     - measure: 16
+#       text: 'h.: A. Skutnik'
+#     - measure: 17
+#       text: 2. Ciebie za przykład uczonym podała *
+#     lyric_verse_count: 3

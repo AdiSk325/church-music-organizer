@@ -1,0 +1,153 @@
+# case.yaml for: Boże mój
+# Auto-generated from expected_final.musicxml
+# Review and adjust values marked with TODO
+
+id: boze_moj
+title: Boże mój
+source: input.png
+difficulty: easy
+tags:
+- satb
+- polish_text
+- repeat
+notes: S A (G) + T B (F), 1 page(s), 4 measures
+
+# ── Step 1: Ingestion ──────────────────────────────
+step_01_ingestion:
+  expected_pages: 1
+  expected_dpi: 300
+  has_text_layer: false
+
+# ── Step 2: Preprocessing ──────────────────────────
+step_02_preprocessing:
+  expected_pages: 1
+
+# ── Step 3: Text Classification ────────────────────
+step_03_text:
+  title: Boże mój
+  subtitle: null
+  composer: 'm.: J. Sykulski'
+  arranger: null
+  part_names: &id002
+  - S A
+  - T B
+  has_lyrics: true
+  lyrics_snippet: Bo że mój, Bo że mój, cze muś mnie o
+  tempo: null
+
+# ── Step 4: Staff Detection ───────────────────────
+step_04_layout:
+  pages:
+  - page: 1
+    staff_count: 2
+    groups:
+    - type: bracket
+      parts: &id001
+      - S A
+      - T B
+    systems: 1
+    measures: 1-4
+
+# ── Step 5: Staff Splitting ───────────────────────
+step_05_splitting:
+  expected_images: 1
+  splits:
+  - group_type: bracket
+    parts: *id001
+
+# ── Step 6: OMR per Staff ─────────────────────────
+step_06_omr:
+  staves:
+  - label: S A
+    clef: G
+    key_signature: -1
+    time_signature: 4/4
+    expected_measures: 4
+    expected_note_count:
+    - 24
+    - 29
+    pitch_range_midi:
+    - 57
+    - 74
+    lyric_verses: 1
+  - label: T B
+    clef: F
+    key_signature: -1
+    time_signature: 4/4
+    expected_measures: 4
+    expected_note_count:
+    - 26
+    - 31
+    pitch_range_midi:
+    - 43
+    - 57
+
+# ── Step 7: Score Assembly ────────────────────────
+step_07_assembly:
+  expected_parts: 2
+  part_names: *id002
+  grouping:
+  - type: bracket
+    parts: *id001
+  total_measures: 4
+  beats_per_measure: 4.0
+  repeat_barlines:
+  - measure: 1
+    direction: forward
+    location: left
+  - measure: 4
+    direction: backward
+    location: right
+
+# ── Step 8: Lyrics ────────────────────────────────
+step_08_lyrics:
+  vocal_parts:
+  - S A
+  non_vocal_parts:
+  - T B
+  expected_syllable_count:
+  - 9
+  - 14
+
+# ── Step 9: Validation ───────────────────────────
+step_09_validation:
+  max_beat_errors: 0
+  max_ambitus_warnings: 5
+  expected_key_consistency: true
+  expected_part_length_match: true
+
+# ── Step 10: Final Output ────────────────────────
+step_10_final:
+  ground_truth_file: expected_final.musicxml
+  min_pitch_accuracy: 0.8
+  min_duration_accuracy: 0.8
+  min_measure_count_accuracy: 1.0
+  min_part_count_accuracy: 1.0
+
+
+# ── Extracted Details (for reference, not used by tests) ──
+# per_part:
+#   S A:
+#     note_count: 27
+#     rest_count: 0
+#     voices:
+#     - '1'
+#     - '2'
+#     staves_count: 1
+#     has_ties: false
+#     has_chords: false
+#     has_dots: true
+#     directions: []
+#     lyric_verse_count: 1
+#   T B:
+#     note_count: 29
+#     rest_count: 0
+#     voices:
+#     - '1'
+#     - '2'
+#     staves_count: 1
+#     has_ties: false
+#     has_chords: true
+#     has_dots: false
+#     directions: []
+#     lyric_verse_count: 0
