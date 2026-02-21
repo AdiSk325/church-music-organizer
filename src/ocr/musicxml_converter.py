@@ -1,9 +1,11 @@
 """Music notation converter for converting OCR results to MusicXML."""
 
+from __future__ import annotations
+
 import logging
 from pathlib import Path
-from typing import Optional
-from music21 import converter, metadata, stream
+from typing import Dict, Optional
+from music21 import converter, metadata, stream, note as m21note, duration as m21duration
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +67,67 @@ class MusicXMLConverter:
             logger.error(f"Error saving MusicXML to {output_path}: {str(e)}")
             return False
     
+    def score_graph_to_score(self, score_graph) -> stream.Score:
+        """Convert a :class:`~src.omr.score_graph.ScoreGraph` to a music21 Score.
+
+        This bridges the OMR pipeline's Intermediate Representation with the
+        existing music21-based export infrastructure.
+
+        Args:
+            score_graph: A :class:`~src.omr.score_graph.ScoreGraph` instance.
+
+        Returns:
+            A ``music21.stream.Score`` ready for MusicXML export.
+        """
+        score = stream.Score()
+
+        # Metadata
+        score.metadata = metadata.Metadata()
+        score.metadata.title = score_graph.title or ""
+        if score_graph.composer:
+            score.metadata.composer = score_graph.composer
+
+        # One part per unique voice_id
+        voice_ids = score_graph.voice_ids()
+        parts: Dict[int, stream.Part] = {}
+        for vid in voice_ids:
+            part = stream.Part()
+            parts[vid] = part
+            score.append(part)
+
+        # Populate parts from measures
+        for measure in score_graph.measures:
+            for voice in measure.voices:
+                if voice.voice_id not in parts:
+                    part = stream.Part()
+                    parts[voice.voice_id] = part
+                    score.append(part)
+
+                m21_measure = stream.Measure(number=measure.number)
+
+                # Add time signature on the first measure
+                if measure.number == 1:
+                    from music21 import meter  # noqa: PLC0415
+                    try:
+                        m21_measure.append(meter.TimeSignature(measure.time_signature))
+                    except Exception:  # noqa: BLE001
+                        pass
+
+                for n in voice.notes:
+                    try:
+                        dur = m21duration.Duration(quarterLength=n.duration)
+                        if n.is_rest:
+                            element = m21note.Rest(duration=dur)
+                        else:
+                            element = m21note.Note(n.pitch, duration=dur)
+                        m21_measure.append(element)
+                    except Exception:  # noqa: BLE001
+                        pass
+
+                parts[voice.voice_id].append(m21_measure)
+
+        return score
+
     def convert_to_musescore(self, musicxml_path: str, output_path: str) -> bool:
         """Convert MusicXML to MuseScore format.
         
