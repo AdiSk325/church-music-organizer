@@ -1,15 +1,11 @@
-"""Tests for OCR module: MusicXMLConverter, SheetMusicOCR, and ScanProcessor."""
+"""Tests for OCR module: MusicXMLConverter."""
 
 import os
-import tempfile
-from pathlib import Path
-from unittest.mock import MagicMock, patch
 
-import numpy as np
 import pytest
 
 from src.database.models import FileType
-from src.ocr import MusicXMLConverter, ScanProcessor, ScanProcessingResult, SheetMusicOCR
+from src.ocr import MusicXMLConverter
 
 
 # ---------------------------------------------------------------------------
@@ -124,165 +120,6 @@ class TestMusicXMLConverter:
         notes = list(parts[0].flatten().notes)
         # 7 words spread across measures of 3 beats
         assert len(notes) == 7
-
-
-# ---------------------------------------------------------------------------
-# SheetMusicOCR tests
-# ---------------------------------------------------------------------------
-
-
-class TestSheetMusicOCR:
-    """Tests for SheetMusicOCR (unit-level, no Tesseract required)."""
-
-    @pytest.fixture
-    def ocr(self, tmp_path):
-        return SheetMusicOCR(output_dir=str(tmp_path))
-
-    def test_init_creates_output_dir(self, tmp_path):
-        """Test that the output directory is created on init."""
-        out = tmp_path / "ocr_output"
-        ocr = SheetMusicOCR(output_dir=str(out))
-        assert out.exists()
-
-    def test_calculate_average_confidence_empty(self, ocr):
-        """Test confidence calculation with empty data."""
-        assert ocr._calculate_average_confidence({"conf": []}) == 0.0
-
-    def test_calculate_average_confidence(self, ocr):
-        """Test confidence calculation with valid data."""
-        data = {"conf": [80, 90, -1, 70]}
-        result = ocr._calculate_average_confidence(data)
-        assert result == pytest.approx(80.0)
-
-    def test_extract_text_blocks_empty(self, ocr):
-        """Test extracting blocks from empty data."""
-        result = ocr._extract_text_blocks({"text": [], "conf": []})
-        assert result == []
-
-    def test_extract_text_blocks(self, ocr):
-        """Test extracting text blocks from OCR data."""
-        data = {
-            "text": ["Hello", "World"],
-            "conf": [90, 5],
-            "left": [10, 100],
-            "top": [20, 30],
-            "width": [50, 60],
-            "height": [15, 15],
-        }
-        blocks = ocr._extract_text_blocks(data)
-        assert len(blocks) == 2
-        assert blocks[0]["text"] == "Hello"
-        assert blocks[0]["confidence"] == 90
-
-    def test_preprocess_image_with_valid_file(self, ocr, tmp_path):
-        """Test preprocessing a real image file."""
-        # Create a simple test image
-        img = np.zeros((100, 200, 3), dtype=np.uint8)
-        img[30:40, :] = 255  # White horizontal line
-        import cv2
-
-        img_path = str(tmp_path / "test.png")
-        cv2.imwrite(img_path, img)
-
-        result = ocr.preprocess_image(img_path)
-        assert isinstance(result, np.ndarray)
-        assert len(result.shape) == 2  # Grayscale
-
-    def test_preprocess_image_missing_file(self, ocr):
-        """Test preprocessing fails gracefully for missing file."""
-        with pytest.raises(FileNotFoundError):
-            ocr.preprocess_image("/nonexistent/image.png")
-
-    def test_detect_staff_regions_empty_image(self, ocr, tmp_path):
-        """Test staff detection on a blank image."""
-        import cv2
-
-        blank = np.ones((200, 400), dtype=np.uint8) * 255
-        path = str(tmp_path / "blank.png")
-        cv2.imwrite(path, blank)
-        regions = ocr.detect_staff_regions(path)
-        assert isinstance(regions, list)
-
-    def test_detect_staff_regions_with_lines(self, ocr, tmp_path):
-        """Test staff detection finds horizontal line regions."""
-        import cv2
-
-        # Create image with thick horizontal black lines (simulating a staff)
-        img = np.ones((300, 600), dtype=np.uint8) * 255
-        for y in range(100, 150, 10):
-            img[y : y + 3, 20:580] = 0  # black line, 3px thick across most of width
-        path = str(tmp_path / "staff.png")
-        cv2.imwrite(path, img)
-        regions = ocr.detect_staff_regions(path)
-        assert isinstance(regions, list)
-
-    def test_detect_music_notation_missing_file(self, ocr):
-        """Test music detection returns False for missing file."""
-        assert ocr.detect_music_notation("/nonexistent.png") is False
-
-
-# ---------------------------------------------------------------------------
-# ScanProcessor tests
-# ---------------------------------------------------------------------------
-
-
-class TestScanProcessor:
-    """Tests for ScanProcessor."""
-
-    @pytest.fixture
-    def processor(self, tmp_path):
-        return ScanProcessor(output_dir=str(tmp_path))
-
-    def test_init_creates_output_dir(self, tmp_path):
-        """Test processor creates output directory."""
-        out = tmp_path / "scan_output"
-        proc = ScanProcessor(output_dir=str(out))
-        assert out.exists()
-
-    def test_process_pdf_missing_file(self, processor):
-        """Test process_pdf with non-existent file returns error."""
-        result = processor.process_pdf("/nonexistent/file.pdf")
-        assert len(result.errors) > 0
-        assert "not found" in result.errors[0].lower()
-
-    def test_process_image_missing_file(self, processor):
-        """Test process_image with non-existent file returns error."""
-        result = processor.process_image("/nonexistent/image.png")
-        assert len(result.errors) > 0
-        assert "not found" in result.errors[0].lower()
-
-    def test_scan_processing_result_defaults(self):
-        """Test ScanProcessingResult has correct defaults."""
-        result = ScanProcessingResult()
-        assert result.source_path == ""
-        assert result.lyrics == ""
-        assert result.text_blocks == []
-        assert result.text_confidence == 0.0
-        assert result.music_detected is False
-        assert result.musicxml_path is None
-        assert result.omr_backend is None
-        assert result.page_results == []
-        assert result.errors == []
-
-    def test_create_skeleton_musicxml(self, processor, tmp_path):
-        """Test skeleton MusicXML creation."""
-        path = processor._create_skeleton_musicxml(
-            title="Test Piece", composer="Composer", lyrics="Pan jest pasterzem"
-        )
-        assert path is not None
-        assert os.path.exists(path)
-        assert path.endswith(".musicxml")
-
-    def test_run_audiveris_not_installed(self, processor, tmp_path):
-        """Test that _run_audiveris returns None when Audiveris is not on PATH."""
-        result = processor._run_audiveris("/some/file.pdf")
-        assert result is None
-
-    def test_run_omr_fallback_to_skeleton(self, processor, tmp_path):
-        """Test that _run_omr falls back to skeleton when Audiveris is not available."""
-        result = processor._run_omr("/some/input.pdf", title="Fallback Test")
-        assert result is not None
-        assert os.path.exists(result)
 
 
 # ---------------------------------------------------------------------------

@@ -1,7 +1,25 @@
 # Church Music Organizer — Copilot Instructions
 
 > Dokument referencyjny dla agentów AI kontynuujących pracę nad projektem.
-> Ostatnia aktualizacja: 2026-02-16
+> Ostatnia aktualizacja: 2026-02-17
+
+### Related Documents
+
+| Document | Purpose |
+|----------|---------|
+| `.github/copilot-instructions.md` | **THIS FILE** — project overview, architecture, known issues |
+| `.github/process-instruction.md` | OMR domain knowledge, pipeline theory, per-step metrics definitions |
+| `.github/development-process.md` | **Development methodology** — TDD workflow, test case structure, metrics framework, refactoring plan |
+
+### Critical Rules for Agents
+
+1. **Read `development-process.md` before any implementation work** — it defines the TDD workflow, test case schema, and Definition of Done.
+2. **Use Poetry** for all dependency management: `poetry add <pkg>`, `poetry install`, `poetry run pytest`.
+3. **Each pipeline step must save inspectable artifacts** to `data/processed/runs/`.
+4. **Write failing tests first** (TDD) in `tests/pipeline/test_step_NN_*.py`.
+5. **No module may exceed 400 lines** — split before adding features.
+6. **Check metrics regression** before committing — no priority-1 test case may regress on critical metrics.
+7. **Terminal**: Use Git Bash as the default shell on Windows.
 
 ---
 
@@ -100,10 +118,25 @@ church-music-organizer/
 │
 ├── tests/
 │   ├── test_database.py            # ✅ Testy bazy danych
-│   └── OMR/                        # Pliki testowe OMR
+│   ├── pipeline/                   # 🔄 Per-step unit tests (TDD)
+│   │   ├── test_step_01_ingestion.py
+│   │   ├── test_step_02_preprocessing.py
+│   │   ├── ...
+│   │   └── test_step_10_integration.py
+│   ├── metrics/                    # 🔄 Metrics computation & regression
+│   └── fixtures/                   # Test data (ground truth per test case)
+│       ├── manifest.yaml           # Master list of all test cases
+│       ├── Alleluja_werset_sw_Anna/
+│       │   ├── case.yaml           # Expected values per step
+│       │   ├── input.pdf
+│       │   └── expected_final.musicxml
+│       └── Boze_moj/
+│           ├── case.yaml
+│           ├── input.png
+│           └── expected_final.musicxml
 │
 ├── data/
-│   ├── uploads/                    # Pliki wejściowe (PDF, MusicXML ground truth)
+│   ├── uploads/                    # Pliki wejściowe (użytkowe, nie testowe)
 │   │   ├── Alleluja_-_werset_sw_Anna.pdf       # Test: SATB + Org
 │   │   ├── Alleluja_-_werset_sw_Anna.musicxml  # Ground truth
 │   │   └── 1/Panis.pdf                         # Test: 4 strony
