@@ -14,6 +14,7 @@ class FileType(enum.Enum):
     PDF = "pdf"
     MUSESCORE = "musescore"
     XML = "xml"
+    MUSICXML = "musicxml"
     TEXT = "text"
     OTHER = "other"
 

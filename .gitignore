@@ -52,3 +52,7 @@ Thumbs.db
 
 # Streamlit
 .streamlit/
+tests/OMR/*
+
+# Resources
+resources/
