@@ -40,6 +40,22 @@ The app is a three-layer Python stack: **Streamlit UI → SQLAlchemy ORM → SQL
 ### UI layer (`src/app/main.py`)
 Single 560-line Streamlit file. Navigation is driven by `st.session_state` with two top-level views: collection list and individual song detail. The app calls `init_db()` on every cold start and interacts with the database through direct SQLAlchemy sessions (not via a service layer). File uploads are saved to `data/uploads/`; OCR outputs go to `data/processed/`.
 
+## Agent system (`.claude/agents/`)
+
+This project uses specialized Claude Code subagents. Invoke them by name when the task matches their scope:
+
+| Agent | Model | Use for |
+|-------|-------|---------|
+| `product-owner` | Opus 4.8 | Project strategy, roadmap, task delegation, domain questions (Polish church music) |
+| `backend-engineer` | Sonnet 4.6 | SQLAlchemy models, Alembic migrations, service layer, query optimization |
+| `ocr-engineer` | Sonnet 4.6 | Tesseract pipeline, OpenCV preprocessing, music21, MusicXML conversion |
+| `ui-engineer` | Sonnet 4.6 | Streamlit pages/components, UX forms, navigation, file viewers |
+| `qa-engineer` | Sonnet 4.6 | pytest tests, fixtures, coverage, edge cases |
+| `devops-engineer` | Haiku 4.5 | Docker, GitHub Actions CI, Alembic setup, pre-commit hooks, backups |
+| `code-reviewer` | Sonnet 4.6 | Code review, security audit, convention checks before merge |
+
+Start a conversation with `product-owner` for strategic work and feature planning. Each agent's definition contains full project context so it can operate independently.
+
 ## Key conventions
 
 - **File types** are controlled by the `FileType` enum in `models.py` (`SCAN`, `PDF`, `MUSESCORE`, `XML`, `TEXT`, `OTHER`). File type detection in the UI uses `python-magic` (requires system `libmagic`).
