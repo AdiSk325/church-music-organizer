@@ -52,3 +52,6 @@ Thumbs.db
 
 # Streamlit
 .streamlit/
+
+# Claude Code
+.claude/worktrees/
