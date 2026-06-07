@@ -1,11 +1,12 @@
 """Database initialization and session management."""
 
 import os
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker, Session
 from contextlib import contextmanager
-from .models import Base
 
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session, sessionmaker
+
+from .models import Base
 
 # Database URL - using SQLite for simplicity
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///church_music.db")

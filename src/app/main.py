@@ -1,74 +1,141 @@
 """Streamlit application for church music organizer."""
 
-import streamlit as st
+import base64
+import logging
 import os
-from pathlib import Path
 import sys
+from datetime import datetime
+from pathlib import Path
+
+import streamlit as st
 
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from src.database import init_db, get_db_session, MusicPiece, MusicFile, Tag, FileType, UsageHistory
-from datetime import datetime
-from sqlalchemy import func
-import base64
+from sqlalchemy import func  # noqa: F401 — kept for future use
+
+from src.database import FileType, MusicFile, MusicPiece, Tag, UsageHistory, get_db_session, init_db
+from src.services import FileService
+
+logger = logging.getLogger(__name__)
 
 # Page configuration
-st.set_page_config(
-    page_title="Church Music Organizer",
-    page_icon="🎵",
-    layout="wide"
-)
+st.set_page_config(page_title="Church Music Organizer", page_icon="🎵", layout="wide")
 
 # Initialize database
 init_db()
 
 
-# Helper functions
+# ---------------------------------------------------------------------------
+# Liturgical domain constants
+# ---------------------------------------------------------------------------
+
+OCCASIONS = [
+    "",
+    "Niedziela",
+    "Wielkanoc",
+    "Boże Narodzenie",
+    "Ślub",
+    "Pogrzeb",
+    "Bierzmowanie",
+    "Pierwsza Komunia",
+    "Adwent",
+    "Wielki Post",
+    "Uroczystość NMP",
+]
+
+SEASONS = [
+    "",
+    "Adwent",
+    "Boże Narodzenie",
+    "Zwykły",
+    "Wielki Post",
+    "Wielkanoc",
+    "Zielone Świątki",
+]
+
+PER_PAGE = 20
+
+
+# ---------------------------------------------------------------------------
+# Query helper — replace body with MusicPieceService.list() when ready
+# ---------------------------------------------------------------------------
+
+
+def query_pieces(
+    db,
+    search: str = "",
+    occasion: str = "",
+    season: str = "",
+    page: int = 0,
+    per_page: int = PER_PAGE,
+):
+    """Centralna funkcja zapytań — łatwa do zastąpienia serwisem."""
+    q = db.query(MusicPiece)
+    if search:
+        term = f"%{search}%"
+        q = q.filter(
+            MusicPiece.title.ilike(term)
+            | MusicPiece.composer.ilike(term)
+            | MusicPiece.lyrics_author.ilike(term)
+        )
+    if occasion:
+        q = q.filter(MusicPiece.occasion == occasion)
+    if season:
+        q = q.filter(MusicPiece.liturgical_season == season)
+    total = q.count()
+    items = q.order_by(MusicPiece.created_at.desc()).offset(page * per_page).limit(per_page).all()
+    return items, total
+
+
+# ---------------------------------------------------------------------------
+# File helpers
+# ---------------------------------------------------------------------------
+
+
 def save_uploaded_file(uploaded_file, music_piece_id: int) -> str:
-    """Save uploaded file and return the path."""
-    upload_dir = Path("data/uploads")
-    upload_dir.mkdir(parents=True, exist_ok=True)
-
-    # Create subdirectory for this piece
-    piece_dir = upload_dir / str(music_piece_id)
-    piece_dir.mkdir(exist_ok=True)
-
-    file_path = piece_dir / uploaded_file.name
-    with open(file_path, "wb") as f:
-        f.write(uploaded_file.getbuffer())
-
-    return str(file_path)
+    """Save uploaded file via FileService (sanitised path) and return the path."""
+    return FileService.save_uploaded_file(
+        piece_id=music_piece_id,
+        filename=uploaded_file.name,
+        file_data=uploaded_file.getbuffer(),
+    )
 
 
 def get_file_type(filename: str) -> FileType:
     """Determine file type from filename."""
     ext = Path(filename).suffix.lower()
 
-    if ext in ['.mscz', '.mscx']:
+    if ext in [".mscz", ".mscx"]:
         return FileType.MUSESCORE
-    elif ext == '.pdf':
+    elif ext == ".pdf":
         return FileType.PDF
-    elif ext in ['.xml', '.musicxml']:
+    elif ext in [".xml", ".musicxml"]:
         return FileType.XML
-    elif ext in ['.txt', '.ly']:
+    elif ext in [".txt", ".ly"]:
         return FileType.TEXT
-    elif ext in ['.jpg', '.jpeg', '.png', '.tiff', '.bmp']:
+    elif ext in [".jpg", ".jpeg", ".png", ".tiff", ".bmp"]:
         return FileType.SCAN
     else:
         return FileType.OTHER
 
 
-# Initialize session state for navigation
+# ---------------------------------------------------------------------------
+# Session state initialisation
+# ---------------------------------------------------------------------------
+
 if "selected_piece_id" not in st.session_state:
     st.session_state.selected_piece_id = None
 
+if "page" not in st.session_state:
+    st.session_state.page = 0
+
+# ---------------------------------------------------------------------------
 # Sidebar navigation
+# ---------------------------------------------------------------------------
+
 st.sidebar.title("🎵 Church Music Organizer")
-page = st.sidebar.selectbox(
-    "Navigation",
-    ["Music Collection", "Song Details"]
-)
+page = st.sidebar.selectbox("Navigation", ["Music Collection", "Song Details"])
 
 # If a piece is selected, switch to details view
 if st.session_state.selected_piece_id is not None and page == "Music Collection":
@@ -77,34 +144,37 @@ if st.session_state.selected_piece_id is not None and page == "Music Collection"
 
 
 # ============================================================
-# TAB 1: Music Collection - Table of last 50 songs with CRUD
+# TAB 1: Music Collection - searched, filtered, paginated list
 # ============================================================
 if page == "Music Collection":
     st.title("📚 Music Collection")
 
     # --- ADD NEW PIECE SECTION ---
-    with st.expander("➕ Add New Music Piece", expanded=False):
+    with st.expander("➕ Dodaj nowy utwór", expanded=False):
         with st.form("add_music_form", clear_on_submit=True):
             col1, col2 = st.columns(2)
 
             with col1:
-                new_title = st.text_input("Song Title *", help="Required field")
-                new_lyrics_author = st.text_input("Lyrics Author (autor słów)")
-                new_music_author = st.text_input("Music Author (autor muzyki)")
-                new_harmony_author = st.text_input("Harmony Author (autor harmonii)")
+                new_title = st.text_input("Tytuł *", help="Pole wymagane")
+                new_lyrics_author = st.text_input("Autor słów")
+                new_music_author = st.text_input("Autor muzyki")
+                new_harmony_author = st.text_input("Autor harmonii")
 
             with col2:
-                new_key_signature = st.text_input("Key Signature (tonacja)", help="e.g., C major, D minor")
-                new_time_signature = st.text_input("Time Signature (metrum)", help="e.g., 4/4, 3/4")
-                new_measures_count = st.number_input("Number of Measures (ilość taktów)", min_value=0, value=0, step=1)
+                new_key_signature = st.text_input("Tonacja", help="np. C-dur, d-moll")
+                new_time_signature = st.text_input("Metrum", help="np. 4/4, 3/4")
+                new_measures_count = st.number_input("Ilość taktów", min_value=0, value=0, step=1)
 
-            tags_input = st.text_input("Tags (comma-separated)", help="e.g., festive, solemn, traditional")
+            tags_input = st.text_input(
+                "Tagi (oddzielone przecinkiem)",
+                help="np. uroczyste, tradycyjne, wielogłosowe",
+            )
 
-            submit = st.form_submit_button("Add Music Piece")
+            submit = st.form_submit_button("Dodaj utwór")
 
             if submit:
                 if not new_title:
-                    st.error("Title is required!")
+                    st.error("Tytuł jest wymagany!")
                 else:
                     try:
                         with get_db_session() as db:
@@ -115,14 +185,15 @@ if page == "Music Collection":
                                 harmony_author=new_harmony_author or None,
                                 key_signature=new_key_signature or None,
                                 time_signature=new_time_signature or None,
-                                measures_count=new_measures_count if new_measures_count > 0 else None,
+                                measures_count=(
+                                    new_measures_count if new_measures_count > 0 else None
+                                ),
                             )
                             db.add(piece)
                             db.flush()
 
-                            # Add tags
                             if tags_input:
-                                tag_names = [t.strip() for t in tags_input.split(',') if t.strip()]
+                                tag_names = [t.strip() for t in tags_input.split(",") if t.strip()]
                                 for tag_name in tag_names:
                                     tag = db.query(Tag).filter_by(name=tag_name).first()
                                     if not tag:
@@ -131,42 +202,93 @@ if page == "Music Collection":
                                     piece.tags.append(tag)
 
                             db.commit()
-                            st.success(f"✅ Music piece '{new_title}' added successfully! (ID: {piece.id})")
+                            st.success(
+                                f"Utwór '{new_title}' został dodany pomyślnie! (ID: {piece.id})"
+                            )
                     except Exception as e:
-                        st.error(f"Error adding music piece: {str(e)}")
+                        logger.exception("Error adding music piece")
+                        st.error(f"Błąd podczas dodawania utworu: {str(e)}")
 
     st.markdown("---")
 
-    # --- TABLE OF LAST 50 PIECES ---
-    st.subheader("Last 50 Music Pieces")
+    # --- SEARCH AND FILTERS ---
+    st.subheader("Kolekcja muzyczna")
 
+    col_search, col_occasion, col_season = st.columns([3, 2, 2])
+    search = col_search.text_input(
+        "Szukaj",
+        placeholder="Tytuł, kompozytor, autor słów...",
+        key="search",
+    )
+    occasion = col_occasion.selectbox("Okazja", OCCASIONS, key="filter_occasion")
+    season = col_season.selectbox("Okres liturgiczny", SEASONS, key="filter_season")
+
+    # Reset page when any filter changes
+    for _key in ["search", "filter_occasion", "filter_season"]:
+        prev_key = f"prev_{_key}"
+        if prev_key not in st.session_state:
+            st.session_state[prev_key] = ""
+        current_val = st.session_state.get(_key, "")
+        if current_val != st.session_state[prev_key]:
+            st.session_state.page = 0
+        st.session_state[prev_key] = current_val
+
+    # Defaults used by pagination controls rendered after the with-block
+    total_pages = 1
+    total = 0
+
+    # --- TABLE OF PIECES ---
     with get_db_session() as db:
-        pieces = db.query(MusicPiece).order_by(
-            MusicPiece.updated_at.desc()
-        ).limit(50).all()
+        pieces, total = query_pieces(
+            db,
+            search=search,
+            occasion=occasion,
+            season=season,
+            page=st.session_state.page,
+            per_page=PER_PAGE,
+        )
+        total_pages = max(1, (total + PER_PAGE - 1) // PER_PAGE)
 
-        if not pieces:
-            st.info("No music pieces yet. Use the form above to add your first piece.")
+        if not pieces and total == 0:
+            if search or occasion or season:
+                st.info("Brak utworów pasujących do podanych kryteriów wyszukiwania.")
+            else:
+                st.info(
+                    "Brak utworów w kolekcji. Użyj formularza powyżej, aby dodać pierwszy utwór."
+                )
         else:
             # Column headers
-            hdr_title, hdr_lyrics, hdr_music, hdr_harmony, hdr_key, hdr_time, hdr_measures, hdr_actions = st.columns(
-                [3, 2, 2, 2, 1.5, 1, 1, 2.5]
-            )
-            hdr_title.markdown("**Song Title**")
-            hdr_lyrics.markdown("**Lyrics Author**")
-            hdr_music.markdown("**Music Author**")
-            hdr_harmony.markdown("**Harmony Author**")
-            hdr_key.markdown("**Key**")
-            hdr_time.markdown("**Time**")
-            hdr_measures.markdown("**Measures**")
-            hdr_actions.markdown("**Actions**")
+            (
+                hdr_title,
+                hdr_lyrics,
+                hdr_music,
+                hdr_harmony,
+                hdr_key,
+                hdr_time,
+                hdr_measures,
+                hdr_actions,
+            ) = st.columns([3, 2, 2, 2, 1.5, 1, 1, 2.5])
+            hdr_title.markdown("**Tytuł**")
+            hdr_lyrics.markdown("**Autor słów**")
+            hdr_music.markdown("**Autor muzyki**")
+            hdr_harmony.markdown("**Autor harmonii**")
+            hdr_key.markdown("**Tonacja**")
+            hdr_time.markdown("**Metrum**")
+            hdr_measures.markdown("**Takty**")
+            hdr_actions.markdown("**Akcje**")
             st.markdown("---")
 
-            # Display rows
             for piece in pieces:
-                col_title, col_lyrics, col_music, col_harmony, col_key, col_time, col_measures, col_actions = st.columns(
-                    [3, 2, 2, 2, 1.5, 1, 1, 2.5]
-                )
+                (
+                    col_title,
+                    col_lyrics,
+                    col_music,
+                    col_harmony,
+                    col_key,
+                    col_time,
+                    col_measures,
+                    col_actions,
+                ) = st.columns([3, 2, 2, 2, 1.5, 1, 1, 2.5])
 
                 col_title.write(piece.title)
                 col_lyrics.write(piece.lyrics_author or "—")
@@ -178,12 +300,10 @@ if page == "Music Collection":
 
                 with col_actions:
                     btn_col1, btn_col2 = st.columns(2)
-                    # Details button
-                    if btn_col1.button("📋", key=f"detail_{piece.id}", help="View Details"):
+                    if btn_col1.button("📋", key=f"detail_{piece.id}", help="Zobacz szczegóły"):
                         st.session_state.selected_piece_id = piece.id
                         st.rerun()
-                    # Delete button
-                    if btn_col2.button("🗑️", key=f"delete_{piece.id}", help="Delete"):
+                    if btn_col2.button("🗑️", key=f"delete_{piece.id}", help="Usuń"):
                         try:
                             with get_db_session() as db2:
                                 p = db2.query(MusicPiece).filter_by(id=piece.id).first()
@@ -192,23 +312,39 @@ if page == "Music Collection":
                                     db2.commit()
                                     st.rerun()
                         except Exception as e:
-                            st.error(f"Error deleting: {str(e)}")
+                            logger.exception("Error deleting piece id=%s", piece.id)
+                            st.error(f"Błąd podczas usuwania: {str(e)}")
 
-            # End of table
             st.markdown("---")
+
+    # --- PAGINATION ---
+    col_prev, col_info, col_next = st.columns([1, 3, 1])
+    if col_prev.button("← Poprzednia", disabled=(st.session_state.page == 0)):
+        st.session_state.page = max(0, st.session_state.page - 1)
+        st.rerun()
+    col_info.markdown(
+        f"<div style='text-align:center'>Strona {st.session_state.page + 1} / "
+        f"{total_pages} ({total} utworów)</div>",
+        unsafe_allow_html=True,
+    )
+    if col_next.button("Następna →", disabled=(st.session_state.page >= total_pages - 1)):
+        st.session_state.page += 1
+        st.rerun()
 
     # --- INLINE EDIT SECTION ---
     st.markdown("---")
-    with st.expander("✏️ Edit Existing Music Piece", expanded=False):
+    with st.expander("✏️ Edytuj istniejący utwór", expanded=False):
         with get_db_session() as db:
-            all_pieces_edit = db.query(MusicPiece).order_by(MusicPiece.title).all()
+            all_pieces_edit = db.query(MusicPiece).order_by(MusicPiece.title).limit(500).all()
             edit_piece_list = [(p.id, p.title) for p in all_pieces_edit]
 
         if not edit_piece_list:
-            st.info("No music pieces to edit.")
+            st.info("Brak utworów do edycji.")
         else:
             piece_options = {f"{pid}: {ptitle}": pid for pid, ptitle in edit_piece_list}
-            selected_edit_str = st.selectbox("Select piece to edit", list(piece_options.keys()), key="edit_select")
+            selected_edit_str = st.selectbox(
+                "Wybierz utwór do edycji", list(piece_options.keys()), key="edit_select"
+            )
             selected_edit_id = piece_options[selected_edit_str]
 
             with get_db_session() as db:
@@ -219,30 +355,44 @@ if page == "Music Collection":
                         col1, col2 = st.columns(2)
 
                         with col1:
-                            edit_title = st.text_input("Song Title *", value=edit_piece.title)
-                            edit_lyrics_author = st.text_input("Lyrics Author", value=edit_piece.lyrics_author or "")
-                            edit_music_author = st.text_input("Music Author", value=edit_piece.music_author or "")
-                            edit_harmony_author = st.text_input("Harmony Author", value=edit_piece.harmony_author or "")
-
-                        with col2:
-                            edit_key = st.text_input("Key Signature", value=edit_piece.key_signature or "")
-                            edit_time = st.text_input("Time Signature", value=edit_piece.time_signature or "")
-                            edit_measures = st.number_input(
-                                "Number of Measures",
-                                min_value=0,
-                                value=edit_piece.measures_count or 0,
-                                step=1
+                            edit_title = st.text_input("Tytuł *", value=edit_piece.title)
+                            edit_lyrics_author = st.text_input(
+                                "Autor słów", value=edit_piece.lyrics_author or ""
+                            )
+                            edit_music_author = st.text_input(
+                                "Autor muzyki", value=edit_piece.music_author or ""
+                            )
+                            edit_harmony_author = st.text_input(
+                                "Autor harmonii", value=edit_piece.harmony_author or ""
                             )
 
-                        save_edit = st.form_submit_button("Save Changes")
+                        with col2:
+                            edit_key = st.text_input(
+                                "Tonacja", value=edit_piece.key_signature or ""
+                            )
+                            edit_time = st.text_input(
+                                "Metrum", value=edit_piece.time_signature or ""
+                            )
+                            edit_measures = st.number_input(
+                                "Ilość taktów",
+                                min_value=0,
+                                value=edit_piece.measures_count or 0,
+                                step=1,
+                            )
+
+                        save_edit = st.form_submit_button("Zapisz zmiany")
 
                         if save_edit:
                             if not edit_title:
-                                st.error("Title is required!")
+                                st.error("Tytuł jest wymagany!")
                             else:
                                 try:
                                     with get_db_session() as db2:
-                                        p = db2.query(MusicPiece).filter_by(id=selected_edit_id).first()
+                                        p = (
+                                            db2.query(MusicPiece)
+                                            .filter_by(id=selected_edit_id)
+                                            .first()
+                                        )
                                         if p:
                                             p.title = edit_title
                                             p.lyrics_author = edit_lyrics_author or None
@@ -250,12 +400,15 @@ if page == "Music Collection":
                                             p.harmony_author = edit_harmony_author or None
                                             p.key_signature = edit_key or None
                                             p.time_signature = edit_time or None
-                                            p.measures_count = edit_measures if edit_measures > 0 else None
+                                            p.measures_count = (
+                                                edit_measures if edit_measures > 0 else None
+                                            )
                                             db2.commit()
-                                            st.success("✅ Changes saved!")
+                                            st.success("Zmiany zostały zapisane!")
                                             st.rerun()
                                 except Exception as e:
-                                    st.error(f"Error saving changes: {str(e)}")
+                                    logger.exception("Error saving inline edit for piece")
+                                    st.error(f"Błąd podczas zapisywania zmian: {str(e)}")
 
 
 # ============================================================
@@ -264,14 +417,15 @@ if page == "Music Collection":
 elif page == "Song Details":
     st.title("🎵 Song Details")
 
-    # Select a piece to view
     with get_db_session() as db:
-        all_pieces_data = [(p.id, p.title) for p in db.query(MusicPiece).order_by(MusicPiece.title).all()]
+        all_pieces_data = [
+            (p.id, p.title)
+            for p in db.query(MusicPiece).order_by(MusicPiece.title).limit(500).all()
+        ]
 
     if not all_pieces_data:
-        st.info("No music pieces yet. Go to 'Music Collection' to add your first piece.")
+        st.info("Brak utworów w kolekcji. Przejdź do 'Music Collection', aby dodać pierwszy utwór.")
     else:
-        # If coming from table button, pre-select that piece
         piece_options = {f"{pid}: {ptitle}": pid for pid, ptitle in all_pieces_data}
         piece_keys = list(piece_options.keys())
 
@@ -283,10 +437,10 @@ elif page == "Song Details":
                     break
 
         selected_piece_str = st.selectbox(
-            "Select Music Piece",
+            "Wybierz utwór",
             piece_keys,
             index=default_index,
-            key="detail_piece_select"
+            key="detail_piece_select",
         )
         selected_piece_id = piece_options[selected_piece_str]
         # Clear the navigation state
@@ -376,7 +530,7 @@ elif page == "Song Details":
                                     label=f"Download {ms_file.original_filename}",
                                     data=f.read(),
                                     file_name=ms_file.original_filename,
-                                    key=f"dl_mscz_{ms_file.id}"
+                                    key=f"dl_mscz_{ms_file.id}",
                                 )
                         else:
                             st.warning(f"File not found on disk: {ms_file.file_path}")
@@ -407,7 +561,9 @@ elif page == "Song Details":
                 # --- USAGE HISTORY ---
                 st.subheader("📅 Usage History")
                 if piece.usage_history:
-                    for usage in sorted(piece.usage_history, key=lambda u: u.usage_date, reverse=True):
+                    for usage in sorted(
+                        piece.usage_history, key=lambda u: u.usage_date, reverse=True
+                    ):
                         st.write(
                             f"- **{usage.usage_date.strftime('%Y-%m-%d')}** "
                             f"{'— ' + usage.event_name if usage.event_name else ''} "
@@ -429,7 +585,9 @@ elif page == "Song Details":
                                 with get_db_session() as db2:
                                     entry = UsageHistory(
                                         music_piece_id=selected_piece_id,
-                                        usage_date=datetime.combine(usage_date, datetime.min.time()),
+                                        usage_date=datetime.combine(
+                                            usage_date, datetime.min.time()
+                                        ),
                                         event_name=usage_event or None,
                                         notes=usage_notes or None,
                                     )
@@ -438,6 +596,7 @@ elif page == "Song Details":
                                     st.success("✅ Usage entry added!")
                                     st.rerun()
                             except Exception as e:
+                                logger.exception("Error adding usage history")
                                 st.error(f"Error: {str(e)}")
 
                 st.markdown("---")
@@ -448,7 +607,7 @@ elif page == "Song Details":
                     "Upload scan (PDF/image) or MuseScore file (.mscz)",
                     accept_multiple_files=True,
                     type=["pdf", "png", "jpg", "jpeg", "tiff", "bmp", "mscz", "mscx"],
-                    key=f"upload_{selected_piece_id}"
+                    key=f"upload_{selected_piece_id}",
                 )
 
                 file_description = st.text_input("File Description (optional)", key="file_desc")
@@ -474,6 +633,7 @@ elif page == "Song Details":
                                 st.success(f"✅ {len(uploaded_files)} file(s) uploaded!")
                                 st.rerun()
                         except Exception as e:
+                            logger.exception("Error uploading files for piece id=%s", selected_piece_id)
                             st.error(f"Error uploading: {str(e)}")
                     else:
                         st.warning("Please select files to upload.")
@@ -487,28 +647,75 @@ elif page == "Song Details":
 
                         with col1:
                             ed_title = st.text_input("Title *", value=piece.title, key="ed_title")
-                            ed_lyrics_author = st.text_input("Lyrics Author", value=piece.lyrics_author or "", key="ed_la")
-                            ed_music_author = st.text_input("Music Author", value=piece.music_author or "", key="ed_ma")
-                            ed_harmony_author = st.text_input("Harmony Author", value=piece.harmony_author or "", key="ed_ha")
-                            ed_composer = st.text_input("Composer", value=piece.composer or "", key="ed_comp")
-                            ed_arranger = st.text_input("Arranger", value=piece.arranger or "", key="ed_arr")
+                            ed_lyrics_author = st.text_input(
+                                "Lyrics Author",
+                                value=piece.lyrics_author or "",
+                                key="ed_la",
+                            )
+                            ed_music_author = st.text_input(
+                                "Music Author",
+                                value=piece.music_author or "",
+                                key="ed_ma",
+                            )
+                            ed_harmony_author = st.text_input(
+                                "Harmony Author",
+                                value=piece.harmony_author or "",
+                                key="ed_ha",
+                            )
+                            ed_composer = st.text_input(
+                                "Composer", value=piece.composer or "", key="ed_comp"
+                            )
+                            ed_arranger = st.text_input(
+                                "Arranger", value=piece.arranger or "", key="ed_arr"
+                            )
 
                         with col2:
-                            ed_key = st.text_input("Key Signature", value=piece.key_signature or "", key="ed_key")
-                            ed_time = st.text_input("Time Signature", value=piece.time_signature or "", key="ed_time")
-                            ed_measures = st.number_input("Measures", min_value=0, value=piece.measures_count or 0, key="ed_meas")
-                            ed_tempo = st.text_input("Tempo", value=piece.tempo or "", key="ed_tempo")
-                            ed_genre = st.text_input("Genre", value=piece.genre or "", key="ed_genre")
-                            ed_language = st.text_input("Language", value=piece.language or "", key="ed_lang")
+                            ed_key = st.text_input(
+                                "Key Signature",
+                                value=piece.key_signature or "",
+                                key="ed_key",
+                            )
+                            ed_time = st.text_input(
+                                "Time Signature",
+                                value=piece.time_signature or "",
+                                key="ed_time",
+                            )
+                            ed_measures = st.number_input(
+                                "Measures",
+                                min_value=0,
+                                value=piece.measures_count or 0,
+                                key="ed_meas",
+                            )
+                            ed_tempo = st.text_input(
+                                "Tempo", value=piece.tempo or "", key="ed_tempo"
+                            )
+                            ed_genre = st.text_input(
+                                "Genre", value=piece.genre or "", key="ed_genre"
+                            )
+                            ed_language = st.text_input(
+                                "Language", value=piece.language or "", key="ed_lang"
+                            )
 
-                        ed_description = st.text_area("Description", value=piece.description or "", key="ed_desc")
-                        ed_lyrics = st.text_area("Lyrics", value=piece.lyrics or "", key="ed_lyrics", height=200)
-                        ed_musescore_link = st.text_input("MuseScore Link", value=piece.musescore_link or "", key="ed_ms_link")
+                        ed_description = st.text_area(
+                            "Description", value=piece.description or "", key="ed_desc"
+                        )
+                        ed_lyrics = st.text_area(
+                            "Lyrics",
+                            value=piece.lyrics or "",
+                            key="ed_lyrics",
+                            height=200,
+                        )
+                        ed_musescore_link = st.text_input(
+                            "MuseScore Link",
+                            value=piece.musescore_link or "",
+                            key="ed_ms_link",
+                        )
                         ed_notes = st.text_area("Notes", value=piece.notes or "", key="ed_notes")
 
-                        # Tags editing
                         current_tags = ", ".join([t.name for t in piece.tags]) if piece.tags else ""
-                        ed_tags = st.text_input("Tags (comma-separated)", value=current_tags, key="ed_tags")
+                        ed_tags = st.text_input(
+                            "Tags (comma-separated)", value=current_tags, key="ed_tags"
+                        )
 
                         save_details = st.form_submit_button("Save All Changes")
 
@@ -518,7 +725,11 @@ elif page == "Song Details":
                             else:
                                 try:
                                     with get_db_session() as db2:
-                                        p = db2.query(MusicPiece).filter_by(id=selected_piece_id).first()
+                                        p = (
+                                            db2.query(MusicPiece)
+                                            .filter_by(id=selected_piece_id)
+                                            .first()
+                                        )
                                         if p:
                                             p.title = ed_title
                                             p.lyrics_author = ed_lyrics_author or None
@@ -528,7 +739,9 @@ elif page == "Song Details":
                                             p.arranger = ed_arranger or None
                                             p.key_signature = ed_key or None
                                             p.time_signature = ed_time or None
-                                            p.measures_count = ed_measures if ed_measures > 0 else None
+                                            p.measures_count = (
+                                                ed_measures if ed_measures > 0 else None
+                                            )
                                             p.tempo = ed_tempo or None
                                             p.genre = ed_genre or None
                                             p.language = ed_language or None
@@ -537,12 +750,19 @@ elif page == "Song Details":
                                             p.musescore_link = ed_musescore_link or None
                                             p.notes = ed_notes or None
 
-                                            # Update tags
                                             p.tags.clear()
                                             if ed_tags:
-                                                tag_names = [t.strip() for t in ed_tags.split(',') if t.strip()]
+                                                tag_names = [
+                                                    t.strip()
+                                                    for t in ed_tags.split(",")
+                                                    if t.strip()
+                                                ]
                                                 for tag_name in tag_names:
-                                                    tag = db2.query(Tag).filter_by(name=tag_name).first()
+                                                    tag = (
+                                                        db2.query(Tag)
+                                                        .filter_by(name=tag_name)
+                                                        .first()
+                                                    )
                                                     if not tag:
                                                         tag = Tag(name=tag_name)
                                                         db2.add(tag)
@@ -552,6 +772,7 @@ elif page == "Song Details":
                                             st.success("✅ All changes saved!")
                                             st.rerun()
                                 except Exception as e:
+                                    logger.exception("Error saving full edit for piece id=%s", selected_piece_id)
                                     st.error(f"Error: {str(e)}")
 
 # Footer

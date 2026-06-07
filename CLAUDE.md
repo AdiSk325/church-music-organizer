@@ -9,9 +9,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 streamlit run src/app/main.py        # starts at http://localhost:8501
 ./run.sh                             # convenience wrapper for the above
 
-# Tests
-pytest                               # runs tests/ with -v --tb=short (configured in pyproject.toml)
-pytest tests/test_database.py::TestMusicPiece::test_create_music_piece  # single test
+# Tests (use python3 -m pytest locally to ensure correct interpreter)
+python3 -m pytest                    # all tests; -v --tb=short configured in pyproject.toml
+python3 -m pytest tests/unit/        # unit tests only (models, database)
+python3 -m pytest tests/functional/  # OCR pipeline tests (skipped until fixtures added)
+python3 -m pytest tests/unit/test_database.py::test_create_music_piece  # single test
 
 # Integration tests (standalone script, not pytest-integrated)
 python test_integration.py
