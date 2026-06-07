@@ -47,6 +47,11 @@ class FileService:
             safe_name = "upload"
 
         dest = dest_dir / safe_name
+
+        # Verify resolved path stays within upload_dir (guards against symlink attacks)
+        if not str(dest.resolve()).startswith(str(Path(upload_dir).resolve())):
+            raise ValueError(f"Unsafe upload path resolved outside upload_dir: {dest}")
+
         dest.write_bytes(file_data)
         return str(dest)
 

@@ -33,10 +33,13 @@ class MusicPieceService:
         Returns:
             Tuple of (list of MusicPiece, total matching count).
         """
+        page = max(0, page)
         query = db.query(MusicPiece)
 
         if search:
-            pattern = f"%{search}%"
+            # Escape SQL LIKE metacharacters so user input is treated literally
+            escaped = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            pattern = f"%{escaped}%"
             query = query.filter(
                 MusicPiece.title.ilike(pattern)
                 | MusicPiece.composer.ilike(pattern)

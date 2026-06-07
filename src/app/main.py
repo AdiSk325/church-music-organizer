@@ -1,6 +1,7 @@
 """Streamlit application for church music organizer."""
 
 import base64
+import logging
 import os
 import sys
 from datetime import datetime
@@ -14,6 +15,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from sqlalchemy import func  # noqa: F401 — kept for future use
 
 from src.database import FileType, MusicFile, MusicPiece, Tag, UsageHistory, get_db_session, init_db
+from src.services import FileService
+
+logger = logging.getLogger(__name__)
 
 # Page configuration
 st.set_page_config(page_title="Church Music Organizer", page_icon="🎵", layout="wide")
@@ -90,18 +94,12 @@ def query_pieces(
 
 
 def save_uploaded_file(uploaded_file, music_piece_id: int) -> str:
-    """Save uploaded file and return the path."""
-    upload_dir = Path("data/uploads")
-    upload_dir.mkdir(parents=True, exist_ok=True)
-
-    piece_dir = upload_dir / str(music_piece_id)
-    piece_dir.mkdir(exist_ok=True)
-
-    file_path = piece_dir / uploaded_file.name
-    with open(file_path, "wb") as f:
-        f.write(uploaded_file.getbuffer())
-
-    return str(file_path)
+    """Save uploaded file via FileService (sanitised path) and return the path."""
+    return FileService.save_uploaded_file(
+        piece_id=music_piece_id,
+        filename=uploaded_file.name,
+        file_data=uploaded_file.getbuffer(),
+    )
 
 
 def get_file_type(filename: str) -> FileType:
@@ -208,6 +206,7 @@ if page == "Music Collection":
                                 f"Utwór '{new_title}' został dodany pomyślnie! (ID: {piece.id})"
                             )
                     except Exception as e:
+                        logger.exception("Error adding music piece")
                         st.error(f"Błąd podczas dodawania utworu: {str(e)}")
 
     st.markdown("---")
@@ -233,6 +232,10 @@ if page == "Music Collection":
         if current_val != st.session_state[prev_key]:
             st.session_state.page = 0
         st.session_state[prev_key] = current_val
+
+    # Defaults used by pagination controls rendered after the with-block
+    total_pages = 1
+    total = 0
 
     # --- TABLE OF PIECES ---
     with get_db_session() as db:
@@ -309,6 +312,7 @@ if page == "Music Collection":
                                     db2.commit()
                                     st.rerun()
                         except Exception as e:
+                            logger.exception("Error deleting piece id=%s", piece.id)
                             st.error(f"Błąd podczas usuwania: {str(e)}")
 
             st.markdown("---")
@@ -331,7 +335,7 @@ if page == "Music Collection":
     st.markdown("---")
     with st.expander("✏️ Edytuj istniejący utwór", expanded=False):
         with get_db_session() as db:
-            all_pieces_edit = db.query(MusicPiece).order_by(MusicPiece.title).all()
+            all_pieces_edit = db.query(MusicPiece).order_by(MusicPiece.title).limit(500).all()
             edit_piece_list = [(p.id, p.title) for p in all_pieces_edit]
 
         if not edit_piece_list:
@@ -403,6 +407,7 @@ if page == "Music Collection":
                                             st.success("Zmiany zostały zapisane!")
                                             st.rerun()
                                 except Exception as e:
+                                    logger.exception("Error saving inline edit for piece")
                                     st.error(f"Błąd podczas zapisywania zmian: {str(e)}")
 
 
@@ -414,7 +419,8 @@ elif page == "Song Details":
 
     with get_db_session() as db:
         all_pieces_data = [
-            (p.id, p.title) for p in db.query(MusicPiece).order_by(MusicPiece.title).all()
+            (p.id, p.title)
+            for p in db.query(MusicPiece).order_by(MusicPiece.title).limit(500).all()
         ]
 
     if not all_pieces_data:
@@ -590,6 +596,7 @@ elif page == "Song Details":
                                     st.success("✅ Usage entry added!")
                                     st.rerun()
                             except Exception as e:
+                                logger.exception("Error adding usage history")
                                 st.error(f"Error: {str(e)}")
 
                 st.markdown("---")
@@ -626,6 +633,7 @@ elif page == "Song Details":
                                 st.success(f"✅ {len(uploaded_files)} file(s) uploaded!")
                                 st.rerun()
                         except Exception as e:
+                            logger.exception("Error uploading files for piece id=%s", selected_piece_id)
                             st.error(f"Error uploading: {str(e)}")
                     else:
                         st.warning("Please select files to upload.")
@@ -764,6 +772,7 @@ elif page == "Song Details":
                                             st.success("✅ All changes saved!")
                                             st.rerun()
                                 except Exception as e:
+                                    logger.exception("Error saving full edit for piece id=%s", selected_piece_id)
                                     st.error(f"Error: {str(e)}")
 
 # Footer
