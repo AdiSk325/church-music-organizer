@@ -80,9 +80,7 @@ def query_pieces(
     if season:
         q = q.filter(MusicPiece.liturgical_season == season)
     total = q.count()
-    items = (
-        q.order_by(MusicPiece.created_at.desc()).offset(page * per_page).limit(per_page).all()
-    )
+    items = q.order_by(MusicPiece.created_at.desc()).offset(page * per_page).limit(per_page).all()
     return items, total
 
 
@@ -165,13 +163,9 @@ if page == "Music Collection":
                 new_harmony_author = st.text_input("Autor harmonii")
 
             with col2:
-                new_key_signature = st.text_input(
-                    "Tonacja", help="np. C-dur, d-moll"
-                )
+                new_key_signature = st.text_input("Tonacja", help="np. C-dur, d-moll")
                 new_time_signature = st.text_input("Metrum", help="np. 4/4, 3/4")
-                new_measures_count = st.number_input(
-                    "Ilość taktów", min_value=0, value=0, step=1
-                )
+                new_measures_count = st.number_input("Ilość taktów", min_value=0, value=0, step=1)
 
             tags_input = st.text_input(
                 "Tagi (oddzielone przecinkiem)",
@@ -256,7 +250,9 @@ if page == "Music Collection":
             if search or occasion or season:
                 st.info("Brak utworów pasujących do podanych kryteriów wyszukiwania.")
             else:
-                st.info("Brak utworów w kolekcji. Użyj formularza powyżej, aby dodać pierwszy utwór.")
+                st.info(
+                    "Brak utworów w kolekcji. Użyj formularza powyżej, aby dodać pierwszy utwór."
+                )
         else:
             # Column headers
             (
@@ -574,9 +570,7 @@ elif page == "Song Details":
                 with st.expander("➕ Add Usage Entry"):
                     with st.form("add_usage_form"):
                         usage_date = st.date_input("Date", value=datetime.now().date())
-                        usage_event = st.text_input(
-                            "Event Name", help="e.g., Sunday Mass, Wedding"
-                        )
+                        usage_event = st.text_input("Event Name", help="e.g., Sunday Mass, Wedding")
                         usage_notes = st.text_input("Notes (optional)")
                         submit_usage = st.form_submit_button("Add Usage")
 
@@ -616,9 +610,7 @@ elif page == "Song Details":
                         try:
                             with get_db_session() as db2:
                                 for uploaded_file in uploaded_files:
-                                    file_path = save_uploaded_file(
-                                        uploaded_file, selected_piece_id
-                                    )
+                                    file_path = save_uploaded_file(uploaded_file, selected_piece_id)
 
                                     music_file = MusicFile(
                                         music_piece_id=selected_piece_id,
@@ -646,9 +638,7 @@ elif page == "Song Details":
                         col1, col2 = st.columns(2)
 
                         with col1:
-                            ed_title = st.text_input(
-                                "Title *", value=piece.title, key="ed_title"
-                            )
+                            ed_title = st.text_input("Title *", value=piece.title, key="ed_title")
                             ed_lyrics_author = st.text_input(
                                 "Lyrics Author",
                                 value=piece.lyrics_author or "",
@@ -712,13 +702,9 @@ elif page == "Song Details":
                             value=piece.musescore_link or "",
                             key="ed_ms_link",
                         )
-                        ed_notes = st.text_area(
-                            "Notes", value=piece.notes or "", key="ed_notes"
-                        )
+                        ed_notes = st.text_area("Notes", value=piece.notes or "", key="ed_notes")
 
-                        current_tags = (
-                            ", ".join([t.name for t in piece.tags]) if piece.tags else ""
-                        )
+                        current_tags = ", ".join([t.name for t in piece.tags]) if piece.tags else ""
                         ed_tags = st.text_input(
                             "Tags (comma-separated)", value=current_tags, key="ed_tags"
                         )
