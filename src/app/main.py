@@ -316,7 +316,7 @@ if page == "Music Collection":
     # --- PAGINATION ---
     col_prev, col_info, col_next = st.columns([1, 3, 1])
     if col_prev.button("← Poprzednia", disabled=(st.session_state.page == 0)):
-        st.session_state.page -= 1
+        st.session_state.page = max(0, st.session_state.page - 1)
         st.rerun()
     col_info.markdown(
         f"<div style='text-align:center'>Strona {st.session_state.page + 1} / "
