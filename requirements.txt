@@ -11,6 +11,8 @@ opencv-python>=4.8.0
 
 # Music Processing
 music21>=9.1.0
+verovio>=5.0.0
+cairosvg>=2.7.0
 
 # Database
 alembic>=1.12.0
