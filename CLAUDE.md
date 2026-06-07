@@ -2,25 +2,44 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Setup
+
+Dependencies are managed with **Poetry**; the virtual environment lives in `.venv` inside the
+project directory (configured via `poetry.toml`).
+
+```bash
+# First-time setup
+pip install poetry          # if Poetry is not already installed
+poetry install              # creates .venv and installs all deps (including dev)
+
+# Activate the shell (optional — all commands below work without it via `poetry run`)
+poetry shell
+```
+
 ## Commands
 
 ```bash
 # Run the application
-streamlit run src/app/main.py        # starts at http://localhost:8501
-./run.sh                             # convenience wrapper for the above
+poetry run streamlit run src/app/main.py   # starts at http://localhost:8501
+./run.sh                                   # convenience wrapper for the above
 
-# Tests (use python3 -m pytest locally to ensure correct interpreter)
-python3 -m pytest                    # all tests; -v --tb=short configured in pyproject.toml
-python3 -m pytest tests/unit/        # unit tests only (models, database)
-python3 -m pytest tests/functional/  # OCR pipeline tests (skipped until fixtures added)
-python3 -m pytest tests/unit/test_database.py::test_create_music_piece  # single test
+# Tests
+poetry run pytest                    # all tests; -v --tb=short configured in pyproject.toml
+poetry run pytest tests/unit/        # unit tests only (models, database)
+poetry run pytest tests/functional/  # OCR pipeline tests (skipped until fixtures added)
+poetry run pytest tests/unit/test_database.py::test_create_music_piece  # single test
 
 # Integration tests (standalone script, not pytest-integrated)
-python test_integration.py
+poetry run python test_integration.py
 
 # Formatting (not enforced in CI)
-black src/ tests/
-isort src/ tests/
+poetry run black src/ tests/
+poetry run isort src/ tests/
+
+# Dependency management
+poetry add <package>                 # add a runtime dependency
+poetry add --group dev <package>     # add a dev-only dependency
+poetry update                        # update all deps within declared constraints
 
 # Docker
 docker-compose up -d

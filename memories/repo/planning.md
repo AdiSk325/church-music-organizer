@@ -1,0 +1,4 @@
+- User wants explicit visibility of manual or external prerequisites for each meaningful milestone.
+- User expects tangible deliverables, preferably a documented Jupyter notebook or runnable script.
+- Synthetic SATB MusicXML -> optional PDF -> OMR roundtrip should be treated as an auxiliary benchmark stream, not a replacement for real scans.
+- Current external tool needs to keep visible: Audiveris, Java, Tesseract, Poppler, optional MuseScore.

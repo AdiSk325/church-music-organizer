@@ -10,9 +10,9 @@ def _make_satb_score(measures: int = 4, key_sig: str = "C", time_sig: str = "4/4
 
     satb_pitches = {
         "Soprano": ["E5", "D5", "C5", "E5"],
-        "Alto":    ["C5", "B4", "G4", "G4"],
-        "Tenor":   ["G4", "G4", "E4", "C4"],
-        "Bass":    ["C3", "G3", "C4", "C4"],
+        "Alto": ["C5", "B4", "G4", "G4"],
+        "Tenor": ["G4", "G4", "E4", "C4"],
+        "Bass": ["C3", "G3", "C4", "C4"],
     }
 
     for voice_name, pitches in satb_pitches.items():
@@ -53,9 +53,11 @@ def _make_unison_score() -> stream.Score:
 # ScoreAnalyzer
 # ---------------------------------------------------------------------------
 
+
 class TestScoreAnalyzer:
     def setup_method(self):
         from src.analysis.score_analyzer import ScoreAnalyzer
+
         self.analyzer = ScoreAnalyzer()
 
     def test_voice_count(self):
@@ -116,6 +118,7 @@ class TestScoreAnalyzer:
             n = note.Note(pitch_str)
             n.duration = duration.Duration(1.0)
             from music21 import note as m21note
+
             lyr = m21note.Lyric(text=syllable)
             n.lyrics = [lyr]
             m.append(n)
@@ -149,6 +152,7 @@ class TestScoreAnalyzer:
 
     def test_to_dict_serialisable(self):
         import json
+
         sc = _make_satb_score()
         d = self.analyzer.analyze(sc)
         raw = d.to_dict()
@@ -165,9 +169,11 @@ class TestScoreAnalyzer:
 # Language detector
 # ---------------------------------------------------------------------------
 
+
 class TestLanguageDetector:
     def setup_method(self):
         from src.analysis.score_analyzer import _detect_language
+
         self._detect = _detect_language
 
     def test_latin_detected(self):
@@ -200,11 +206,13 @@ class TestLanguageDetector:
 # PdfToMusicXml quality report
 # ---------------------------------------------------------------------------
 
+
 class TestQualityReport:
     def test_quality_report_same_file(self, tmp_path):
         """Quality report comparing a file with itself should score 1.0."""
-        from src.ocr.pdf_to_musicxml import PdfToMusicXml
         from music21 import converter
+
+        from src.ocr.pdf_to_musicxml import PdfToMusicXml
 
         sc = _make_satb_score(measures=4)
         xml_path = str(tmp_path / "test.xml")
@@ -237,6 +245,7 @@ class TestQualityReport:
 # ---------------------------------------------------------------------------
 # AnalysisService
 # ---------------------------------------------------------------------------
+
 
 class TestAnalysisService:
     def test_analyze_file_returns_descriptor(self, tmp_path):
