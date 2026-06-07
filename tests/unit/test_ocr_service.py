@@ -10,6 +10,33 @@ from sqlalchemy.orm import sessionmaker
 from src.database.models import Base, FileType, MusicFile, MusicPiece
 from src.services.ocr_service import OCRService
 
+# ---------------------------------------------------------------------------
+# Tests: is_available() — delegates to tesseract_available()
+# ---------------------------------------------------------------------------
+
+
+class TestOCRServiceIsAvailable:
+    def test_delegates_to_tesseract_available(self):
+        with patch("src.services.ocr_service.tesseract_available", return_value=True) as mock_fn:
+            result = OCRService.is_available()
+        assert result is True
+        mock_fn.assert_called_once()
+
+    def test_returns_true_when_tesseract_found(self):
+        with patch("src.services.ocr_service.tesseract_available", return_value=True):
+            assert OCRService.is_available() is True
+
+    def test_returns_false_when_tesseract_not_found(self):
+        with patch("src.services.ocr_service.tesseract_available", return_value=False):
+            assert OCRService.is_available() is False
+
+    def test_is_static_method(self):
+        """is_available must work without instantiating the class."""
+        with patch("src.services.ocr_service.tesseract_available", return_value=False):
+            # Callable on the class, not on an instance
+            result = OCRService.is_available()
+        assert isinstance(result, bool)
+
 
 @pytest.fixture
 def db_session():
