@@ -640,6 +640,55 @@ elif page == "Song Details":
 
                 st.markdown("---")
 
+                # --- ATTACHED FILES WITH OCR ---
+                st.subheader("📁 Attached Files")
+                if piece.files:
+                    for mf in piece.files:
+                        col_name, col_type, col_ocr = st.columns([4, 2, 2])
+                        col_name.write(mf.original_filename or Path(mf.file_path).name)
+                        col_type.write(mf.file_type.value)
+
+                        if mf.is_processed:
+                            col_ocr.success("✅ OCR gotowy")
+                            if mf.extracted_text:
+                                with st.expander(
+                                    f"Tekst OCR (pewność: {mf.ocr_confidence}%)",
+                                    expanded=False,
+                                ):
+                                    st.text_area(
+                                        "",
+                                        mf.extracted_text,
+                                        height=200,
+                                        key=f"ocr_text_{mf.id}",
+                                        disabled=True,
+                                    )
+                        elif mf.file_type.value in ("scan", "pdf"):
+                            if col_ocr.button("🔍 OCR", key=f"ocr_{mf.id}"):
+                                try:
+                                    from src.services import OCRService  # lazy import
+
+                                    ocr_service = OCRService()
+                                    with get_db_session() as db_ocr:
+                                        result = ocr_service.process_file(db_ocr, mf.id)
+                                    if result:
+                                        st.success(
+                                            f"OCR zakończony — pewność: {result['confidence']}%"
+                                        )
+                                        if result.get("has_music_notation"):
+                                            st.info("🎵 Wykryto notację muzyczną")
+                                        st.rerun()
+                                    else:
+                                        st.error("OCR nie powiódł się.")
+                                except Exception as e:
+                                    logger.exception("OCR failed for file_id=%s", mf.id)
+                                    st.error(f"Błąd OCR: {e}")
+                        else:
+                            col_ocr.write("—")
+                else:
+                    st.info("Brak plików przypisanych do tego utworu.")
+
+                st.markdown("---")
+
                 # --- EDIT DETAILS ---
                 with st.expander("✏️ Edit Song Details"):
                     with st.form("edit_details_form"):
