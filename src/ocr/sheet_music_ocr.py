@@ -153,6 +153,39 @@ class SheetMusicOCR:
             logger.error(f"Error processing PDF {pdf_path}: {str(e)}")
             return []
 
+    def process_file(self, file_path: str) -> "Dict | List[Dict]":
+        """Process an image or PDF file and return OCR results.
+
+        For PDF files returns a list of per-page dicts; for images returns a single dict.
+        Each dict contains keys: ``text``, ``confidence``, ``has_music_notation``.
+
+        Args:
+            file_path: Path to the file to process.
+
+        Returns:
+            For PDFs: list of dicts with keys text, confidence, has_music_notation, page.
+            For images: dict with keys text, confidence, has_music_notation.
+        """
+        path = Path(file_path)
+        suffix = path.suffix.lower()
+
+        if suffix == ".pdf":
+            pages = self.process_pdf(file_path)
+            for page in pages:
+                # process_pdf pages don't include has_music_notation yet — add placeholder
+                page.setdefault("has_music_notation", False)
+            return pages
+
+        # Image path
+        result = self.extract_text(file_path)
+        has_notation = self.detect_music_notation(file_path)
+        return {
+            "text": result.get("text", ""),
+            "confidence": result.get("confidence", 0),
+            "has_music_notation": has_notation,
+            "blocks": result.get("blocks", []),
+        }
+
     def detect_music_notation(self, image_path: str) -> bool:
         """Detect if image contains music notation.
 

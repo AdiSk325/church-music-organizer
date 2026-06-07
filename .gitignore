@@ -43,6 +43,11 @@ data/uploads/*
 data/processed/*
 !data/processed/.gitkeep
 
+# Coverage
+.coverage
+htmlcov/
+coverage.xml
+
 # Logs
 *.log
 
