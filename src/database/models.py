@@ -69,6 +69,8 @@ class MusicFile(Base):
     mime_type = Column(String(100))
     description = Column(Text)
     is_processed = Column(Integer, default=0)  # 0 = not processed, 1 = processed
+    extracted_text = Column(Text, nullable=True)  # wynik OCR
+    ocr_confidence = Column(Integer, nullable=True)  # 0-100
     created_at = Column(DateTime, default=datetime.utcnow)
 
     # Relationships
