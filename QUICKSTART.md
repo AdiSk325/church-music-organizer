@@ -1,91 +1,166 @@
-# Quick Start Guide
+# QuickStart — Church Music Organizer
 
-## 1. Install Dependencies
+Przewodnik po aktualnej wersji projektu (v2.0 — czerwiec 2026).
+
+---
+
+## Uruchomienie lokalne
+
+### Wymagania systemowe
 
 ```bash
-# Install Python dependencies
+# Ubuntu/Debian
+sudo apt-get install -y tesseract-ocr tesseract-ocr-pol tesseract-ocr-eng \
+  poppler-utils libmagic1
+
+# macOS
+brew install tesseract tesseract-lang poppler libmagic
+```
+
+### Instalacja i start
+
+```bash
+git clone https://github.com/AdiSk325/church-music-organizer.git
+cd church-music-organizer
 pip install -r requirements.txt
-
-# Install Tesseract OCR
-# Ubuntu/Debian:
-sudo apt-get install tesseract-ocr tesseract-ocr-pol tesseract-ocr-eng
-
-# macOS:
-brew install tesseract tesseract-lang
+streamlit run src/app/main.py       # http://localhost:8501
 ```
 
-## 2. Run the Application
+### Docker (zalecane — bez instalacji zależności systemowych)
 
 ```bash
-# Simple way
-./run.sh
-
-# Or directly
-streamlit run src/app/main.py
+docker-compose up -d                # http://localhost:8501
 ```
 
-The application will open at: http://localhost:8501
+---
 
-## 3. Quick Tutorial
+## Co umie aktualna wersja
 
-### Add Your First Music Piece
+### Music Collection (zakładka 1)
+- **Dodawanie pieśni** — formularz z 23 polami: tytuł, kompozytor, autorzy, tonacja, metrum, okazja liturgiczna, tagi itp.
+- **Wyszukiwanie** — pasek szuka po tytule, kompozytorze i autorze słów (ILIKE, case-insensitive)
+- **Filtry** — Okazja (Wielkanoc, Boże Narodzenie…) i Okres liturgiczny (Adwent, Wielki Post…)
+- **Paginacja** — 20 wyników na stronę
+- **Edycja inline** — szybka zmiana kluczowych pól bez wchodzenia w szczegóły
+- **Usuwanie** — usuwa utwór wraz z plikami i historią wykonań (cascade)
 
-1. Click **Add Music** in the sidebar
-2. Enter the title (required)
-3. Fill in other details (composer, key, etc.)
-4. Add tags (comma-separated): "hymn, easter, traditional"
-5. Click **Add Music Piece**
+### Song Details (zakładka 2)
+- **Pełne metadane** — wszystkie 23 pola, tagi, tekst słów, link MuseScore
+- **Upload plików** — PDF, skany (JPG/PNG/TIFF), pliki MuseScore (.mscz), MusicXML (.xml)
+- **OCR na żądanie** — przycisk "🔍 OCR" przy każdym pliku PDF/skanie:
+  - uruchamia Tesseract (PL + EN) z preprocessingiem OpenCV
+  - wykrywa obecność notacji muzycznej (Hough transform)
+  - zapisuje wyekstrahowany tekst i ocenę pewności (0-100%) do bazy
+  - wynik widoczny od razu w rozwijalnym panelu tekstowym
+- **Historia wykonań** — kiedy i gdzie utwór był wykonany
 
-### Upload Files
+---
 
-1. Click **Upload Files**
-2. Select the music piece from dropdown
-3. Choose files to upload (PDF, scans, etc.)
-4. Click **Upload**
-
-### Process with OCR
-
-1. Click **OCR Processing**
-2. Select a scanned file or PDF
-3. Click **Process with OCR**
-4. View extracted text and confidence score
-
-### Browse Your Collection
-
-1. Click **Browse Music**
-2. Use search filters to find pieces
-3. Expand cards to see details
-
-## Using Docker
+## Komendy deweloperskie
 
 ```bash
-# Build and run
-docker-compose up -d
+# Testy
+python3 -m pytest tests/unit/ -v              # 51 testów jednostkowych
+python3 -m pytest tests/unit/ -q              # szybki przebieg
+python3 -m pytest tests/unit/ -k "ocr"        # tylko testy OCR
+python3 -m pytest tests/functional/ -v        # testy OCR na prawdziwych plikach
+                                               # (pomijane gdy brak fixtures)
+# Pokrycie
+python3 -m pytest tests/unit/ --cov=src --cov-report=term-missing
 
-# View logs
-docker-compose logs -f
+# Formatowanie
+black src/ tests/
+isort src/ tests/
 
-# Stop
-docker-compose down
+# Migracje bazy
+alembic upgrade head                           # zastosuj wszystkie migracje
+alembic revision --autogenerate -m "opis"      # nowa migracja po zmianie modelu
+alembic downgrade -1                           # cofnij ostatnią migrację
 ```
 
-## Troubleshooting
+---
 
-**Tesseract not found?**
-- Make sure Tesseract is installed and in PATH
-- Ubuntu: `sudo apt-get install tesseract-ocr`
-- macOS: `brew install tesseract`
+## Praca z agentami AI
 
-**Database errors?**
-- Delete `church_music.db` and restart the app
-- The database will be recreated automatically
+Projekt ma 7 wyspecjalizowanych agentów Claude w `.claude/agents/`. Wywołaj je przez `/nazwa-agenta` w Claude Code CLI lub deleguj im zadanie w tej sesji.
 
-**Import errors?**
-- Run from project root directory
-- Ensure all dependencies installed: `pip install -r requirements.txt`
+| Agent | Kiedy używać |
+|-------|-------------|
+| `/product-owner` | Planowanie, priorytety, rozmowa o domenowych decyzjach |
+| `/backend-engineer` | Nowe modele, migracje, warstwa serwisowa |
+| `/ocr-engineer` | Pipeline OCR, preprocessing obrazów, music21 |
+| `/ui-engineer` | Nowe widoki Streamlit, formularze, UX |
+| `/qa-engineer` | Pisanie testów, analiza pokrycia, fixtures |
+| `/devops-engineer` | CI/CD, Docker, konfiguracja środowiska |
+| `/code-reviewer` | Przegląd kodu przed merge |
 
-## Next Steps
+---
 
-- Read [USAGE.md](USAGE.md) for detailed examples
-- Check [FEATURES.md](FEATURES.md) for all features
-- See [CONTRIBUTING.md](CONTRIBUTING.md) to contribute
+## Testy funkcjonalne OCR
+
+Gdy masz skany nut do przetestowania — wrzuć je do repozytorium:
+
+```
+tests/functional/fixtures/
+├── scans/
+│   ├── koleda_boze_narodzenie.jpg    ← wrzuć skan tutaj
+│   └── psalm23.pdf                   ← lub PDF
+└── expected/
+    └── koleda_boze_narodzenie.json   ← oczekiwany wynik
+```
+
+Format pliku `expected/*.json`:
+```json
+{
+  "contains_text": ["Bóg się rodzi", "kolęda"],
+  "has_music_notation": true,
+  "min_confidence": 60
+}
+```
+
+CI automatycznie uruchamia testy funkcjonalne gdy fixtures są obecne.
+
+---
+
+## Architektura
+
+```
+src/
+├── app/main.py              ← Streamlit UI (793 linie)
+├── services/
+│   ├── music_piece_service.py   ← CRUD, filtrowanie, paginacja
+│   ├── file_service.py          ← upload, sanityzacja ścieżki, zapis OCR
+│   └── ocr_service.py           ← orkiestracja OCR (SheetMusicOCR → FileService)
+├── database/
+│   ├── models.py            ← MusicPiece (23 pola), MusicFile, Tag, UsageHistory
+│   └── database.py          ← engine, get_db_session() (context manager)
+└── ocr/
+    ├── sheet_music_ocr.py       ← Tesseract wrapper, preprocessing OpenCV
+    └── musicxml_converter.py    ← music21, konwersja MusicXML ← niezintegrowany
+```
+
+**Zasada sesji:** zawsze używaj `get_db_session()` jako context managera do zapisu. Serwisy robią `db.flush()` — commit należy do callera.
+
+---
+
+## Zmienne środowiskowe
+
+Skopiuj `.env.example` do `.env`:
+
+```env
+DATABASE_URL=sqlite:///church_music.db   # ścieżka do bazy SQLite
+UPLOAD_DIR=data/uploads                   # katalog uploadowanych plików
+PROCESSED_DIR=data/processed              # katalog wyników OCR
+```
+
+---
+
+## Znane ograniczenia (v2.0)
+
+| Ograniczenie | Wpływ |
+|---|---|
+| SQLite + jeden użytkownik | Tylko do użytku lokalnego lub na zamkniętym serwerze |
+| OCR wymaga Tesseract | Bez instalacji systemowej przycisk OCR zwróci błąd |
+| Brak walidacji MIME | Typ pliku ustalany tylko po rozszerzeniu |
+| Selectbox pieśni ładuje max 500 rekordów | Może być wolny przy bardzo dużej kolekcji |
+| `init_db()` przy starcie | Przy istniejącej bazie nie zastosuje migracji Alembic — uruchom `alembic upgrade head` ręcznie po zmianie modeli |
