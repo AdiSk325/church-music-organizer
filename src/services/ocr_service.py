@@ -7,7 +7,7 @@ from typing import Optional
 from sqlalchemy.orm import Session
 
 from src.database.models import MusicFile
-from src.ocr.sheet_music_ocr import SheetMusicOCR
+from src.ocr.sheet_music_ocr import SheetMusicOCR, tesseract_available
 from src.services.file_service import FileService
 
 logger = logging.getLogger(__name__)
@@ -18,6 +18,11 @@ class OCRService:
 
     def __init__(self):
         self._ocr = SheetMusicOCR()
+
+    @staticmethod
+    def is_available() -> bool:
+        """Return True if the Tesseract OCR engine is installed and callable."""
+        return tesseract_available()
 
     def process_file(self, db: Session, file_id: int) -> Optional[dict]:
         """Run OCR on MusicFile.file_path and save results.
@@ -33,7 +38,9 @@ class OCRService:
         Returns:
             Dict with OCR results, or None on failure.
         """
-        music_file: Optional[MusicFile] = db.query(MusicFile).filter(MusicFile.id == file_id).first()
+        music_file: Optional[MusicFile] = (
+            db.query(MusicFile).filter(MusicFile.id == file_id).first()
+        )
         if music_file is None:
             logger.warning("OCRService: MusicFile id=%s not found", file_id)
             return None
@@ -52,9 +59,7 @@ class OCRService:
         # process_file może zwrócić listę (PDF wielostronicowy) lub dict
         if isinstance(result, list):
             # Połącz tekst z wszystkich stron
-            combined_text = "\n\n--- Strona ---\n\n".join(
-                page.get("text", "") for page in result
-            )
+            combined_text = "\n\n--- Strona ---\n\n".join(page.get("text", "") for page in result)
             confidence = int(
                 sum(page.get("confidence", 0) for page in result) / max(len(result), 1)
             )

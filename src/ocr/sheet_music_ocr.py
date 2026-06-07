@@ -12,6 +12,34 @@ from PIL import Image
 
 logger = logging.getLogger(__name__)
 
+# On Windows the tesseract binary is not on PATH by default. Allow the user to
+# point at it via the TESSERACT_CMD env var; otherwise probe the usual install
+# location so the app works out of the box after a standard install.
+_TESSERACT_CMD = os.environ.get("TESSERACT_CMD")
+if not _TESSERACT_CMD and os.name == "nt":
+    for _candidate in (
+        r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+        r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+    ):
+        if Path(_candidate).exists():
+            _TESSERACT_CMD = _candidate
+            break
+if _TESSERACT_CMD:
+    pytesseract.pytesseract.tesseract_cmd = _TESSERACT_CMD
+
+
+def tesseract_available() -> bool:
+    """Return True if the Tesseract OCR binary can be invoked.
+
+    Used by the UI/service layer to degrade gracefully (show a friendly
+    message) instead of throwing when Tesseract is not installed.
+    """
+    try:
+        pytesseract.get_tesseract_version()
+        return True
+    except Exception:  # pytesseract.TesseractNotFoundError and friends
+        return False
+
 
 class SheetMusicOCR:
     """OCR processor for sheet music."""

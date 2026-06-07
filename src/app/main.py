@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from sqlalchemy import func  # noqa: F401 — kept for future use
 
 from src.database import FileType, MusicFile, MusicPiece, Tag, UsageHistory, get_db_session, init_db
-from src.services import FileService
+from src.services import FileService, OCRService, OMRService
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +120,30 @@ def get_file_type(filename: str) -> FileType:
         return FileType.OTHER
 
 
+def attach_files(db, piece_id: int, uploaded_files, description: str = "") -> list:
+    """Persist uploaded files for a piece and return the created MusicFile records."""
+    created = []
+    for uploaded_file in uploaded_files:
+        file_path = save_uploaded_file(uploaded_file, piece_id)
+        music_file = MusicFile(
+            music_piece_id=piece_id,
+            file_path=file_path,
+            file_type=get_file_type(uploaded_file.name),
+            original_filename=uploaded_file.name,
+            file_size=uploaded_file.size,
+            description=description or None,
+        )
+        db.add(music_file)
+        created.append(music_file)
+    return created
+
+
+# File extensions accepted for scan/score uploads across the app
+UPLOAD_TYPES = ["pdf", "png", "jpg", "jpeg", "tiff", "bmp", "mscz", "mscx", "xml", "musicxml"]
+# File types that OCR / OMR can process
+OCR_TYPES = {FileType.SCAN, FileType.PDF}
+
+
 # ---------------------------------------------------------------------------
 # Session state initialisation
 # ---------------------------------------------------------------------------
@@ -170,6 +194,13 @@ if page == "Music Collection":
                 help="np. uroczyste, tradycyjne, wielogłosowe",
             )
 
+            new_files = st.file_uploader(
+                "Skan / plik nutowy (opcjonalnie)",
+                accept_multiple_files=True,
+                type=UPLOAD_TYPES,
+                help="PDF, obraz skanu, MuseScore lub MusicXML. OCR/OMR uruchomisz w szczegółach utworu.",
+            )
+
             submit = st.form_submit_button("Dodaj utwór")
 
             if submit:
@@ -201,10 +232,18 @@ if page == "Music Collection":
                                         db.add(tag)
                                     piece.tags.append(tag)
 
+                            if new_files:
+                                attach_files(db, piece.id, new_files)
+
+                            piece_id = piece.id
                             db.commit()
-                            st.success(
-                                f"Utwór '{new_title}' został dodany pomyślnie! (ID: {piece.id})"
-                            )
+                            msg = f"Utwór '{new_title}' został dodany pomyślnie! (ID: {piece_id})"
+                            if new_files:
+                                msg += (
+                                    f" Dodano {len(new_files)} plik(ów) — "
+                                    "przejdź do 'Song Details', aby uruchomić OCR/OMR."
+                                )
+                            st.success(msg)
                     except Exception as e:
                         logger.exception("Error adding music piece")
                         st.error(f"Błąd podczas dodawania utworu: {str(e)}")
@@ -515,6 +554,148 @@ elif page == "Song Details":
 
                 st.markdown("---")
 
+                # --- OMR / OCR PROCESSING ---
+                st.subheader("🎼 OMR / OCR Processing")
+
+                _omr_avail = OMRService.is_available()
+                _ocr_avail = OCRService.is_available()
+                _status_col1, _status_col2 = st.columns(2)
+                with _status_col1:
+                    if _omr_avail:
+                        st.success("✅ Audiveris dostępny")
+                    else:
+                        st.warning(
+                            "⚠️ Audiveris niedostępny — " "patrz docs/knowledge/installation.md"
+                        )
+                with _status_col2:
+                    if _ocr_avail:
+                        st.success("✅ Tesseract OCR dostępny")
+                    else:
+                        st.warning(
+                            "⚠️ Tesseract niedostępny — zainstaluj tesseract-ocr "
+                            "z pakietami językowymi pol i eng"
+                        )
+
+                processable_files = pdf_files + scan_files
+                if processable_files:
+                    st.write("**Pliki do przetworzenia (PDF / skan):**")
+                    for proc_file in processable_files:
+                        st.write(f"📄 `{proc_file.original_filename}`")
+                        _btn_omr, _btn_ocr = st.columns(2)
+
+                        # OMR button — converts PDF/scan to MusicXML via Audiveris
+                        if _btn_omr.button(
+                            "🎼 Uruchom OMR → MusicXML",
+                            key=f"omr_{proc_file.id}",
+                            disabled=not _omr_avail,
+                        ):
+                            with st.spinner(
+                                "Konwersja PDF→MusicXML przez Audiveris... "
+                                "(może potrwać kilka minut)"
+                            ):
+                                try:
+                                    with get_db_session() as db2:
+                                        omr_res = OMRService().process_file(db2, proc_file.id)
+                                        if omr_res is None:
+                                            st.error(
+                                                "Błąd OMR: nie znaleziono pliku "
+                                                f"(ID={proc_file.id}) w bazie danych."
+                                            )
+                                        elif not omr_res.get("success"):
+                                            st.error(
+                                                "Błąd OMR: " + omr_res.get("error", "nieznany błąd")
+                                            )
+                                        else:
+                                            db2.commit()
+                                            xml_path_str = omr_res["musicxml_path"]
+                                            st.success(
+                                                "✅ Konwersja zakończona! " f"Plik: {xml_path_str}"
+                                            )
+                                            _xml_p = Path(xml_path_str)
+                                            if _xml_p.exists():
+                                                st.download_button(
+                                                    label=f"⬇️ Pobierz {_xml_p.name}",
+                                                    data=_xml_p.read_bytes(),
+                                                    file_name=_xml_p.name,
+                                                    mime="application/xml",
+                                                    key=f"dl_omr_result_{proc_file.id}",
+                                                )
+                                            st.rerun()
+                                except Exception as _exc:
+                                    logger.exception("OMR failed for file_id=%s", proc_file.id)
+                                    st.error(f"Błąd przetwarzania OMR: {str(_exc)}")
+
+                        # OCR button — extracts text via Tesseract
+                        if _btn_ocr.button(
+                            "📝 Uruchom OCR → tekst",
+                            key=f"ocr_{proc_file.id}",
+                            disabled=not _ocr_avail,
+                        ):
+                            with st.spinner(
+                                "Ekstrakcja tekstu przez Tesseract OCR... " "(może potrwać chwilę)"
+                            ):
+                                try:
+                                    with get_db_session() as db2:
+                                        ocr_res = OCRService().process_file(db2, proc_file.id)
+                                        if ocr_res is None:
+                                            st.error(
+                                                "Błąd OCR: nie udało się przetworzyć pliku "
+                                                f"'{proc_file.original_filename}'. "
+                                                "Sprawdź logi aplikacji."
+                                            )
+                                        else:
+                                            db2.commit()
+                                            _conf = ocr_res.get("confidence", 0)
+                                            _has_not = ocr_res.get("has_music_notation", False)
+                                            _suffix = " | Wykryto zapis nutowy" if _has_not else ""
+                                            st.success(
+                                                f"✅ OCR zakończony. Pewność: {_conf}%" + _suffix
+                                            )
+                                            _ocr_text = ocr_res.get("text", "")
+                                            if _ocr_text:
+                                                with st.expander(
+                                                    "📄 Wyekstrahowany tekst",
+                                                    expanded=True,
+                                                ):
+                                                    st.text_area(
+                                                        "Tekst OCR",
+                                                        value=_ocr_text,
+                                                        height=200,
+                                                        key=f"ocr_text_{proc_file.id}",
+                                                        disabled=True,
+                                                    )
+                                            else:
+                                                st.info("OCR nie wykrył żadnego tekstu " "w pliku.")
+                                except Exception as _exc:
+                                    logger.exception("OCR failed for file_id=%s", proc_file.id)
+                                    st.error(f"Błąd przetwarzania OCR: {str(_exc)}")
+                else:
+                    st.info(
+                        "Brak plików PDF lub skanów do przetworzenia. "
+                        "Wgraj plik w sekcji 'Upload Files' poniżej."
+                    )
+
+                # Existing XML files (OMR output) available for download
+                xml_files = [f for f in piece.files if f.file_type == FileType.XML]
+                if xml_files:
+                    st.write("**Wygenerowane pliki MusicXML:**")
+                    for xml_file in xml_files:
+                        _xml_disk = Path(xml_file.file_path)
+                        if _xml_disk.exists():
+                            st.download_button(
+                                label=f"⬇️ Pobierz {xml_file.original_filename}",
+                                data=_xml_disk.read_bytes(),
+                                file_name=xml_file.original_filename,
+                                mime="application/xml",
+                                key=f"dl_xml_{xml_file.id}",
+                            )
+                        else:
+                            st.warning(
+                                "Plik MusicXML nie znaleziony na dysku: " f"{xml_file.file_path}"
+                            )
+
+                st.markdown("---")
+
                 # --- MUSESCORE LINK ---
                 st.subheader("🎼 MuseScore")
                 musescore_files = [f for f in piece.files if f.file_type == FileType.MUSESCORE]
@@ -633,7 +814,9 @@ elif page == "Song Details":
                                 st.success(f"✅ {len(uploaded_files)} file(s) uploaded!")
                                 st.rerun()
                         except Exception as e:
-                            logger.exception("Error uploading files for piece id=%s", selected_piece_id)
+                            logger.exception(
+                                "Error uploading files for piece id=%s", selected_piece_id
+                            )
                             st.error(f"Error uploading: {str(e)}")
                     else:
                         st.warning("Please select files to upload.")
@@ -772,7 +955,9 @@ elif page == "Song Details":
                                             st.success("✅ All changes saved!")
                                             st.rerun()
                                 except Exception as e:
-                                    logger.exception("Error saving full edit for piece id=%s", selected_piece_id)
+                                    logger.exception(
+                                        "Error saving full edit for piece id=%s", selected_piece_id
+                                    )
                                     st.error(f"Error: {str(e)}")
 
 # Footer
