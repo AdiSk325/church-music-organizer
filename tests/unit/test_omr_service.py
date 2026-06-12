@@ -328,6 +328,22 @@ class TestOMRServiceSuccess:
         f.write_bytes(b"<score-partwise version='4.0'/>")
         return f
 
+    @pytest.fixture(autouse=True)
+    def _isolate_io(self, monkeypatch, xml_output):
+        """Isolate FileService (no real data/uploads writes) and skip real analysis.
+
+        ``save_uploaded_file`` is stubbed to return the temp output path itself, so
+        ``musicxml_path`` stays equal to ``xml_output`` and no real analysis runs.
+        """
+        monkeypatch.setattr(
+            "src.services.file_service.FileService.save_uploaded_file",
+            lambda piece_id, filename, file_data, upload_dir="data/uploads": str(xml_output),
+        )
+        monkeypatch.setattr(
+            "src.services.analysis_service.AnalysisService.analyze_file",
+            lambda self, path: None,
+        )
+
     def test_returns_success_true(self, db_session, pdf_file, tmp_path, xml_output):
         service = _make_service(tmp_path)
         service._converter.convert.return_value = str(xml_output)
@@ -464,3 +480,100 @@ class TestOMRServiceSuccess:
             input_path=pdf_file.file_path,
             output_dir=str(tmp_path),
         )
+
+
+# ---------------------------------------------------------------------------
+# Tests: process_file() — automatic musical analysis enrichment
+# ---------------------------------------------------------------------------
+
+
+class TestOMRServiceAutoAnalysis:
+    """A successful OMR run analyses the score and enriches the parent piece."""
+
+    @pytest.fixture
+    def xml_output(self, tmp_path):
+        f = tmp_path / "out.mxl"
+        f.write_bytes(b"<score-partwise version='4.0'/>")
+        return f
+
+    @pytest.fixture(autouse=True)
+    def _stub_filesvc(self, monkeypatch, xml_output):
+        # Keep the output in tmp (no real data/uploads writes).
+        monkeypatch.setattr(
+            "src.services.file_service.FileService.save_uploaded_file",
+            lambda piece_id, filename, file_data, upload_dir="data/uploads": str(xml_output),
+        )
+
+    @staticmethod
+    def _fake_descriptor():
+        from src.analysis.score_descriptor import ScoreDescriptor
+
+        return ScoreDescriptor(
+            detected_key="F major",
+            key_confidence=0.9,
+            time_signatures=["3/4"],
+            measure_count=42,
+            voice_count=4,
+            voice_names=["S", "A", "T", "B"],
+            texture_type="homophonic_chorale",
+            harmony_epoch="renaissance",
+            lyrics_language="la",
+            estimated_grade=2,
+            grade_label="elementary",
+            narrative_description="A short narrative.",
+        )
+
+    def test_fills_empty_piece_fields(self, db_session, pdf_file, xml_output, monkeypatch):
+        desc = self._fake_descriptor()
+        monkeypatch.setattr(
+            "src.services.analysis_service.AnalysisService.analyze_file",
+            lambda self, path: desc,
+        )
+        service = _make_service()
+        service._converter.convert.return_value = str(xml_output)
+
+        result = service.process_file(db_session, pdf_file.id)
+        db_session.commit()
+
+        piece = (
+            db_session.query(MusicPiece).filter(MusicPiece.id == pdf_file.music_piece_id).first()
+        )
+        assert piece.key_signature == "F major"
+        assert piece.time_signature == "3/4"
+        assert piece.measures_count == 42
+        assert piece.language == "łacina"
+        assert "[Auto-analiza OMR]" in (piece.description or "")
+        assert result["analysis"]["detected_key"] == "F major"
+
+    def test_does_not_overwrite_user_data(self, db_session, pdf_file, xml_output, monkeypatch):
+        desc = self._fake_descriptor()
+        monkeypatch.setattr(
+            "src.services.analysis_service.AnalysisService.analyze_file",
+            lambda self, path: desc,
+        )
+        piece = (
+            db_session.query(MusicPiece).filter(MusicPiece.id == pdf_file.music_piece_id).first()
+        )
+        piece.key_signature = "C major"  # user-entered value
+        db_session.flush()
+
+        service = _make_service()
+        service._converter.convert.return_value = str(xml_output)
+        service.process_file(db_session, pdf_file.id)
+        db_session.commit()
+
+        db_session.refresh(piece)
+        assert piece.key_signature == "C major"  # preserved
+
+    def test_analysis_failure_is_non_fatal(self, db_session, pdf_file, xml_output, monkeypatch):
+        monkeypatch.setattr(
+            "src.services.analysis_service.AnalysisService.analyze_file",
+            lambda self, path: None,
+        )
+        service = _make_service()
+        service._converter.convert.return_value = str(xml_output)
+
+        result = service.process_file(db_session, pdf_file.id)
+
+        assert result["success"] is True
+        assert result["analysis"] is None

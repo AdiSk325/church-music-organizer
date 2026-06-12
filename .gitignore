@@ -44,6 +44,9 @@ data/uploads/*
 data/processed/*
 !data/processed/.gitkeep
 
+# Tesseract language packs (large binaries, installed locally)
+data/tessdata/
+
 # Coverage
 .coverage
 htmlcov/

@@ -27,6 +27,15 @@ if not _TESSERACT_CMD and os.name == "nt":
 if _TESSERACT_CMD:
     pytesseract.pytesseract.tesseract_cmd = _TESSERACT_CMD
 
+# Extra language packs (e.g. Polish) often cannot be written into the system
+# install dir without admin rights, so we ship them in a project-local
+# ``data/tessdata`` folder and point Tesseract at it via TESSDATA_PREFIX. A
+# value already set in the environment always wins.
+if not os.environ.get("TESSDATA_PREFIX"):
+    _LOCAL_TESSDATA = Path(__file__).resolve().parents[2] / "data" / "tessdata"
+    if _LOCAL_TESSDATA.is_dir() and any(_LOCAL_TESSDATA.glob("*.traineddata")):
+        os.environ["TESSDATA_PREFIX"] = str(_LOCAL_TESSDATA)
+
 
 def tesseract_available() -> bool:
     """Return True if the Tesseract OCR binary can be invoked.
@@ -39,6 +48,36 @@ def tesseract_available() -> bool:
         return True
     except Exception:  # pytesseract.TesseractNotFoundError and friends
         return False
+
+
+def available_languages() -> set:
+    """Return the set of installed Tesseract language packs (empty if unknown)."""
+    try:
+        return set(pytesseract.get_languages(config=""))
+    except Exception:
+        return set()
+
+
+def resolve_languages(requested: str = "pol+eng") -> str:
+    """Trim *requested* OCR languages down to those actually installed.
+
+    Tesseract raises if asked for a language pack that is not present (e.g. ``pol``
+    on a default Windows install), which would silently blank the OCR result.
+    This keeps only installed languages, falling back to English (or any single
+    installed pack) so OCR degrades gracefully. When the installed set cannot be
+    introspected, the request is passed through unchanged.
+    """
+    installed = available_languages()
+    if not installed:
+        return requested
+    wanted = [lang for lang in requested.split("+") if lang in installed]
+    if wanted:
+        return "+".join(wanted)
+    if "eng" in installed:
+        logger.warning("Requested OCR languages %r unavailable; falling back to 'eng'", requested)
+        return "eng"
+    fallback = next((lang for lang in sorted(installed) if lang != "osd"), None)
+    return fallback or requested
 
 
 class SheetMusicOCR:
@@ -89,6 +128,10 @@ class SheetMusicOCR:
             Dictionary with extracted text information
         """
         try:
+            # Use only installed language packs (avoids hard failure when, e.g.,
+            # the Polish pack is missing on a default Windows Tesseract install).
+            lang = resolve_languages(lang)
+
             # Preprocess image
             processed_img = self.preprocess_image(image_path)
 

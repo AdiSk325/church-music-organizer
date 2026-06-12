@@ -557,6 +557,37 @@ elif page == "Song Details":
                 # --- OMR / OCR PROCESSING ---
                 st.subheader("🎼 OMR / OCR Processing")
 
+                # Flash the result of a just-completed OMR run (survives st.rerun()).
+                _flash = st.session_state.pop("omr_flash", None)
+                if _flash and _flash.get("piece_id") == selected_piece_id:
+                    st.success(
+                        "✅ OMR zakończony — plik MusicXML zapisano i powiązano z utworem; "
+                        "metadane utworu uzupełniono automatyczną analizą."
+                    )
+                    _an = (_flash.get("result") or {}).get("analysis")
+                    if _an:
+                        _ts = ", ".join(_an.get("time_signatures") or []) or "—"
+                        _voices = ", ".join(_an.get("voice_names") or []) or "—"
+                        st.markdown(
+                            "**🔎 Automatyczna analiza muzyczna:**\n"
+                            f"- Tonacja: **{_an.get('detected_key') or '—'}** "
+                            f"(pewność {_an.get('key_confidence', 0):.0%})\n"
+                            f"- Metrum: **{_ts}** | Takty: **{_an.get('measure_count') or '—'}**\n"
+                            f"- Głosy ({_an.get('voice_count') or 0}): {_voices}\n"
+                            f"- Faktura: **{_an.get('texture_type') or '—'}** | "
+                            f"Epoka: **{_an.get('harmony_epoch') or '—'}**\n"
+                            f"- Język tekstu: **{_an.get('lyrics_language') or '—'}** | "
+                            f"Trudność: **{_an.get('grade_label') or '—'}** "
+                            f"(grade {_an.get('estimated_grade') or '—'})"
+                        )
+                        if _an.get("narrative"):
+                            st.caption(_an["narrative"])
+                    else:
+                        st.info(
+                            "Plik skonwertowany, ale automatyczna analiza się nie powiodła "
+                            "(sprawdź logi). Możesz uzupełnić metadane ręcznie."
+                        )
+
                 _omr_avail = OMRService.is_available()
                 _ocr_avail = OCRService.is_available()
                 _status_col1, _status_col2 = st.columns(2)
@@ -607,19 +638,12 @@ elif page == "Song Details":
                                             )
                                         else:
                                             db2.commit()
-                                            xml_path_str = omr_res["musicxml_path"]
-                                            st.success(
-                                                "✅ Konwersja zakończona! " f"Plik: {xml_path_str}"
-                                            )
-                                            _xml_p = Path(xml_path_str)
-                                            if _xml_p.exists():
-                                                st.download_button(
-                                                    label=f"⬇️ Pobierz {_xml_p.name}",
-                                                    data=_xml_p.read_bytes(),
-                                                    file_name=_xml_p.name,
-                                                    mime="application/xml",
-                                                    key=f"dl_omr_result_{proc_file.id}",
-                                                )
+                                            # Stash the result; rendered after rerun so
+                                            # the new file + updated metadata are visible.
+                                            st.session_state["omr_flash"] = {
+                                                "piece_id": selected_piece_id,
+                                                "result": omr_res,
+                                            }
                                             st.rerun()
                                 except Exception as _exc:
                                     logger.exception("OMR failed for file_id=%s", proc_file.id)
