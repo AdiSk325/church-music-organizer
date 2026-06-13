@@ -55,7 +55,7 @@ _MODEL_ENV = {
 
 # Generous output ceilings — MusicXML can be large; streaming avoids SDK HTTP timeouts.
 # Gemini 2.5 models support up to 65 536 output tokens.
-_MAX_TOKENS = {"text": 8000, "score": 64000, "lyrics": 64000}
+_MAX_TOKENS = {"text": 8000, "score": 65535, "lyrics": 65535}
 
 # Env var names that may hold a Gemini API key (zero-config order used by the SDK).
 _KEY_ENV = ("GEMINI_API_KEY", "GOOGLE_API_KEY")
@@ -69,6 +69,41 @@ def _model_for(step: str) -> str:
     if env_key and os.getenv(env_key):
         return os.environ[env_key].strip()
     return os.getenv("CMO_LLM_MODEL", _DEFAULT_MODEL).strip()
+
+
+def _thinking_budget() -> int:
+    """Token budget for Gemini's internal "thinking" (``0`` disables it).
+
+    Every pipeline step is *output-bound*: structured lyric extraction (step 2) and full
+    MusicXML regeneration (steps 4/5) need their whole token budget for the answer. With
+    thinking on, the model can spend the entire ``max_output_tokens`` reasoning and stop at
+    ``MAX_TOKENS`` before emitting anything — yielding an empty parse or a truncated, invalid
+    document. Disabling it by default keeps the pipeline robust; re-enable via
+    ``CMO_LLM_THINKING_BUDGET`` (gemini-2.5-flash accepts 0–24576).
+    """
+    try:
+        return max(0, int(os.getenv("CMO_LLM_THINKING_BUDGET", "0").strip()))
+    except ValueError:
+        return 0
+
+
+def _finish_reason(response) -> Optional[str]:
+    """Best-effort extraction of the first candidate's finish reason for diagnostics."""
+    try:
+        return str(response.candidates[0].finish_reason)
+    except Exception:  # pragma: no cover - defensive
+        return None
+
+
+def _blocked_reason(response) -> Optional[str]:
+    """Return Gemini's prompt ``block_reason`` (e.g. ``PROHIBITED_CONTENT``) if the request
+    was rejected at the safety layer — which yields zero candidates and no text."""
+    try:
+        feedback = getattr(response, "prompt_feedback", None)
+        reason = getattr(feedback, "block_reason", None) if feedback else None
+        return str(reason) if reason else None
+    except Exception:  # pragma: no cover - defensive
+        return None
 
 
 def _api_key() -> Optional[str]:
@@ -128,13 +163,43 @@ class LLMClient:
         config = types.GenerateContentConfig(
             system_instruction=system,
             max_output_tokens=max_tokens,
+            thinking_config=types.ThinkingConfig(thinking_budget=_thinking_budget()),
         )
-        chunks = self._client.models.generate_content_stream(
+        parts: list[str] = []
+        finish: Optional[str] = None
+        blocked: Optional[str] = None
+        for chunk in self._client.models.generate_content_stream(
             model=model,
             contents=user,
             config=config,
-        )
-        return "".join(chunk.text or "" for chunk in chunks)
+        ):
+            if chunk.text:
+                parts.append(chunk.text)
+            reason = _finish_reason(chunk)
+            if reason:
+                finish = reason
+            block = _blocked_reason(chunk)
+            if block:
+                blocked = block
+
+        text = "".join(parts)
+        if finish and "MAX_TOKENS" in finish:
+            # Partial output is still returned (the caller's music21 gate rejects it); warn
+            # so a too-small max_tokens / overlong score is diagnosable.
+            logger.warning(
+                "complete_text: odpowiedź ucięta na limicie tokenów (step=%s, model=%s)",
+                step,
+                model,
+            )
+        if not text:
+            if blocked:
+                raise RuntimeError(
+                    f"Gemini zablokował zapytanie filtrem treści ({blocked}; step={step})."
+                )
+            raise RuntimeError(
+                f"Gemini zwrócił pustą odpowiedź (step={step}, finish_reason={finish})."
+            )
+        return text
 
     def parse(self, system: str, user: str, schema: Type[T], *, step: str) -> T:
         """Run a completion constrained to ``schema`` (a Pydantic model) and return it.
@@ -153,6 +218,7 @@ class LLMClient:
             max_output_tokens=max_tokens,
             response_mime_type="application/json",
             response_schema=schema,
+            thinking_config=types.ThinkingConfig(thinking_budget=_thinking_budget()),
         )
         response = self._client.models.generate_content(
             model=model,
@@ -163,7 +229,18 @@ class LLMClient:
         if parsed is not None:
             return parsed
         # Fallback: the SDK could not auto-parse — validate the raw JSON ourselves.
-        return schema.model_validate_json(response.text)  # type: ignore[attr-defined]
+        raw = getattr(response, "text", None)
+        if raw:
+            return schema.model_validate_json(raw)  # type: ignore[attr-defined]
+        blocked = _blocked_reason(response)
+        if blocked:
+            raise RuntimeError(
+                f"Gemini zablokował zapytanie filtrem treści ({blocked}; step={step})."
+            )
+        raise RuntimeError(
+            f"Gemini nie zwrócił danych strukturalnych (step={step}, schema={schema.__name__}, "
+            f"finish_reason={_finish_reason(response)})."
+        )
 
 
 def extract_musicxml(text: str) -> Optional[str]:

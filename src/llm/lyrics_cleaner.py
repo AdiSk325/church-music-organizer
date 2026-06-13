@@ -7,6 +7,8 @@ verse/refrain structure — without inventing text that is not plausibly there.
 """
 
 import logging
+import re
+import unicodedata
 from typing import Optional
 
 try:  # pydantic ships with google-genai; degrade gracefully when neither is installed
@@ -50,6 +52,27 @@ Nie dodawaj komentarza poza wymaganymi polami.\
 """
 
 
+def _prefilter_ocr_noise(raw_text: str) -> str:
+    """Drop pure OCR noise before the text reaches the LLM.
+
+    Sheet-music OCR interleaves the lyrics with garbage from the staves/notes
+    (e.g. ``Ba = + p p = e p p 2 > p``). Beyond hurting quality, such noise reliably
+    trips Gemini's non-adjustable ``PROHIBITED_CONTENT`` prompt filter — which blocks the
+    whole request and returns no candidate. We keep only tokens that contain at least two
+    letters (real words/syllables) and drop everything else, line by line.
+    """
+    # Normalise and strip control / replacement characters first.
+    text = unicodedata.normalize("NFC", raw_text).replace("�", " ")
+    text = "".join(ch for ch in text if ch in "\n\t" or unicodedata.category(ch)[0] != "C")
+
+    kept_lines = []
+    for line in text.splitlines():
+        words = [w for w in re.split(r"\s+", line) if len(re.findall(r"[^\W\d_]", w)) >= 2]
+        if words:
+            kept_lines.append(" ".join(words))
+    return "\n".join(kept_lines).strip()
+
+
 def clean_lyrics(raw_text: str, client: Optional[LLMClient] = None) -> CleanedLyrics:
     """Reconstruct clean lyrics from raw OCR text.
 
@@ -61,7 +84,15 @@ def clean_lyrics(raw_text: str, client: Optional[LLMClient] = None) -> CleanedLy
         A :class:`CleanedLyrics` with detected language, cleaned text and notes.
     """
     client = client or LLMClient()
-    user = f"Surowy tekst OCR do oczyszczenia:\n\n{raw_text}"
+    filtered = _prefilter_ocr_noise(raw_text)
+    if not filtered:
+        logger.info("clean_lyrics: po filtrze szumu OCR nie został żaden tekst")
+        return CleanedLyrics(
+            language="und",
+            cleaned_lyrics="",
+            notes="Po odfiltrowaniu szumu OCR nie pozostał żaden czytelny tekst.",
+        )
+    user = f"Surowy tekst OCR do oczyszczenia:\n\n{filtered}"
     result = client.parse(_SYSTEM, user, CleanedLyrics, step="text")
     logger.info(
         "clean_lyrics: język=%s, długość=%d",
