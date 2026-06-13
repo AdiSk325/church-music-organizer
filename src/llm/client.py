@@ -32,6 +32,18 @@ try:
 except Exception:  # pragma: no cover - defensive
     pass
 
+# Use the OS-native certificate store for TLS. On Windows with an HTTPS-intercepting
+# proxy/antivirus the server presents a certificate signed by a local root CA that lives
+# in the Windows store but not in certifi's bundle — which httpx (used by google-genai)
+# would otherwise reject with CERTIFICATE_VERIFY_FAILED. ``truststore`` makes Python trust
+# the OS store instead. Best-effort: harmless and a no-op where not installed/needed.
+try:  # pragma: no cover - environment-dependent
+    import truststore
+
+    truststore.inject_into_ssl()
+except Exception:
+    pass
+
 _DEFAULT_MODEL = "gemini-2.5-flash"
 
 # Per-step model override env vars (fall back to CMO_LLM_MODEL, then the hard default).
