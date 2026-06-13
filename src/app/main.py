@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from sqlalchemy import func  # noqa: F401 — kept for future use
 
 from src.database import FileType, MusicFile, MusicPiece, Tag, UsageHistory, get_db_session, init_db
-from src.services import FileService, OCRService, OMRService
+from src.services import FileService, OCRService, OMRService, PipelineService
 
 logger = logging.getLogger(__name__)
 
@@ -588,9 +588,23 @@ elif page == "Song Details":
                             "(sprawdź logi). Możesz uzupełnić metadane ręcznie."
                         )
 
+                # Flash the result of a just-completed full-pipeline run.
+                _pipe_flash = st.session_state.pop("pipeline_flash", None)
+                if _pipe_flash and _pipe_flash.get("piece_id") == selected_piece_id:
+                    st.success("✅ Pipeline zakończony — podsumowanie kroków poniżej:")
+                    _icons = {"ok": "✅", "skipped": "⏭️", "error": "❌"}
+                    for _step in _pipe_flash.get("steps", []):
+                        _ico = _icons.get(_step.get("status"), "•")
+                        st.markdown(f"{_ico} **{_step.get('name')}** — {_step.get('detail', '')}")
+                        _report = _step.get("report")
+                        if _report:
+                            with st.expander(f"📋 Raport: {_step.get('name')}"):
+                                st.markdown(_report)
+
                 _omr_avail = OMRService.is_available()
                 _ocr_avail = OCRService.is_available()
-                _status_col1, _status_col2 = st.columns(2)
+                _llm_avail = PipelineService.llm_available()
+                _status_col1, _status_col2, _status_col3 = st.columns(3)
                 with _status_col1:
                     if _omr_avail:
                         st.success("✅ Audiveris dostępny")
@@ -606,12 +620,48 @@ elif page == "Song Details":
                             "⚠️ Tesseract niedostępny — zainstaluj tesseract-ocr "
                             "z pakietami językowymi pol i eng"
                         )
+                with _status_col3:
+                    if _llm_avail:
+                        st.success("✅ Gemini LLM dostępny")
+                    else:
+                        st.warning(
+                            "⚠️ Gemini LLM niedostępny — zainstaluj 'google-genai' i ustaw "
+                            "GEMINI_API_KEY w pliku .env"
+                        )
 
                 processable_files = pdf_files + scan_files
                 if processable_files:
                     st.write("**Pliki do przetworzenia (PDF / skan):**")
                     for proc_file in processable_files:
                         st.write(f"📄 `{proc_file.original_filename}`")
+
+                        # Full cascade pipeline (steps 1→5: OCR→LLM→OMR→LLM→LLM)
+                        if st.button(
+                            "🤖 Pełny pipeline (1→5)",
+                            key=f"pipe_{proc_file.id}",
+                            disabled=not (_ocr_avail or _omr_avail),
+                            type="primary",
+                            help="OCR → czyszczenie tekstu (LLM) → OMR → korekta partytury "
+                            "(LLM) → podkład tekstu (LLM). Kroki bez dostępnego silnika są "
+                            "pomijane.",
+                        ):
+                            with st.spinner(
+                                "Uruchamiam pełny pipeline (OCR, czyszczenie tekstu, OMR, "
+                                "korekta partytury, podkład tekstu)... to może potrwać kilka minut."
+                            ):
+                                try:
+                                    with get_db_session() as db2:
+                                        pipe_res = PipelineService().run_full(db2, proc_file.id)
+                                        db2.commit()
+                                        st.session_state["pipeline_flash"] = {
+                                            "piece_id": selected_piece_id,
+                                            "steps": pipe_res.get("steps", []),
+                                        }
+                                        st.rerun()
+                                except Exception as _exc:
+                                    logger.exception("Pipeline failed for file_id=%s", proc_file.id)
+                                    st.error(f"Błąd pipeline: {str(_exc)}")
+
                         _btn_omr, _btn_ocr = st.columns(2)
 
                         # OMR button — converts PDF/scan to MusicXML via Audiveris
@@ -693,6 +743,85 @@ elif page == "Song Details":
                                 except Exception as _exc:
                                     logger.exception("OCR failed for file_id=%s", proc_file.id)
                                     st.error(f"Błąd przetwarzania OCR: {str(_exc)}")
+
+                        # --- Individual LLM steps (operate on existing artefacts) ---
+                        _btn_clean, _btn_score = st.columns(2)
+                        _has_ocr_text = bool(proc_file.extracted_text)
+                        if _btn_clean.button(
+                            "🧹 Oczyść tekst (LLM)",
+                            key=f"clean_{proc_file.id}",
+                            disabled=not (_llm_avail and _has_ocr_text),
+                            help=None if _has_ocr_text else "Najpierw uruchom OCR.",
+                        ):
+                            with st.spinner("Czyszczenie tekstu przez Claude..."):
+                                try:
+                                    with get_db_session() as db2:
+                                        r2 = PipelineService().run_step2_clean_text(
+                                            db2,
+                                            selected_piece_id,
+                                            proc_file.extracted_text or "",
+                                        )
+                                        db2.commit()
+                                    if r2.get("status") == "ok":
+                                        st.success(
+                                            f"✅ Tekst oczyszczony (język: {r2.get('language')})."
+                                        )
+                                        if r2.get("detail"):
+                                            st.caption(r2["detail"])
+                                        st.rerun()
+                                    else:
+                                        st.info(r2.get("detail", "Pominięto."))
+                                except Exception as _exc:
+                                    logger.exception("clean text failed")
+                                    st.error(f"Błąd czyszczenia tekstu: {str(_exc)}")
+
+                        # Correct + underlay — needs an existing MusicXML file for this piece.
+                        _piece_xml = next(
+                            (f for f in reversed(piece.files) if f.file_type == FileType.XML),
+                            None,
+                        )
+                        if _btn_score.button(
+                            "🎶 Korekta + podkład (LLM)",
+                            key=f"score_{proc_file.id}",
+                            disabled=not (_llm_avail and _piece_xml is not None),
+                            help=None if _piece_xml else "Najpierw uruchom OMR.",
+                        ):
+                            with st.spinner("Korekta partytury i podkład tekstu przez Claude..."):
+                                try:
+                                    with get_db_session() as db2:
+                                        svc = PipelineService()
+                                        r4 = svc.run_step4_correct_score(
+                                            db2, selected_piece_id, _piece_xml.file_path
+                                        )
+                                        steps = [{"name": "4. Korekta partytury (LLM)", **r4}]
+                                        _has_lyrics = bool((piece.lyrics or "").strip())
+                                        if r4.get("status") == "ok" and _has_lyrics:
+                                            r5 = svc.run_step5_underlay(
+                                                db2,
+                                                selected_piece_id,
+                                                piece.lyrics,
+                                                xml_path=_piece_xml.file_path,
+                                                xml_content=r4.get("musicxml"),
+                                            )
+                                            steps.append({"name": "5. Podkład tekstu (LLM)", **r5})
+                                        elif not _has_lyrics:
+                                            steps.append(
+                                                {
+                                                    "name": "5. Podkład tekstu (LLM)",
+                                                    "status": "skipped",
+                                                    "detail": "Brak tekstu utworu — "
+                                                    "najpierw oczyść tekst (krok 2).",
+                                                }
+                                            )
+                                        db2.commit()
+                                        st.session_state["pipeline_flash"] = {
+                                            "piece_id": selected_piece_id,
+                                            "steps": steps,
+                                        }
+                                        st.rerun()
+                                except Exception as _exc:
+                                    logger.exception("score correct/underlay failed")
+                                    st.error(f"Błąd korekty/podkładu: {str(_exc)}")
                 else:
                     st.info(
                         "Brak plików PDF lub skanów do przetworzenia. "

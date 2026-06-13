@@ -58,6 +58,21 @@ The app is a three-layer Python stack: **Streamlit UI → SQLAlchemy ORM → SQL
 - `sheet_music_ocr.py`: Wraps Tesseract. Preprocesses images (grayscale → adaptive threshold → denoise), runs OCR with Polish + English language packs, scores confidence, and detects staff lines via Hough transforms. Works on both images and multi-page PDFs (via pdf2image).
 - `musicxml_converter.py`: Uses music21 to generate/convert MusicXML notation. Requires MuseScore installed for `.mscz` export.
 
+### LLM pipeline layer (`src/llm/`, `src/services/pipeline_service.py`)
+A 5-step transcription pipeline that chains the existing OCR/OMR engines with three new
+Gemini-powered agents. Runnable as a cascade (`PipelineService.run_full`) or step by step:
+
+1. **OCR** (Tesseract) → raw text — `OCRService` *(existing)*
+2. **LLM clean text** → `MusicPiece.lyrics` — `src/llm/lyrics_cleaner.py` (structured output: language + cleaned lyrics)
+3. **OMR** (Audiveris) → MusicXML — `OMRService` *(existing)*
+4. **LLM correct score** → new `MusicFile(XML)` + change report — `src/llm/score_corrector.py`
+5. **LLM underlay lyrics + validate** → new `MusicFile(XML)` — `src/llm/lyric_underlayer.py`
+
+- `src/llm/client.py`: `LLMClient` wraps the Google Gemini SDK `google-genai` (imported lazily). `llm_available()` gates the UI like `tesseract_available()`/`audiveris_available()`. Steps 4/5 use streaming (`generate_content_stream`); step 2 uses structured outputs (`response_schema` + `response.parsed`).
+- `src/llm/musicxml_validate.py`: `load_musicxml_text()` decompresses `.mxl`; `validate_musicxml()` round-trips LLM output through music21 — **invalid output is rejected and the previous good file is kept** (steps 4/5 never overwrite the original OMR file; they always write a NEW `MusicFile`).
+- **Auth**: default `genai.Client()` is zero-config — it reads `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) from the environment. No key in code. `.env` is loaded by `client.py` on import.
+- **Config (.env)**: `GEMINI_API_KEY` (required), `CMO_LLM_MODEL` (default `gemini-2.5-flash`), and per-step overrides `CMO_LLM_MODEL_TEXT` / `CMO_LLM_MODEL_SCORE` / `CMO_LLM_MODEL_LYRICS`.
+
 ### UI layer (`src/app/main.py`)
 Single 560-line Streamlit file. Navigation is driven by `st.session_state` with two top-level views: collection list and individual song detail. The app calls `init_db()` on every cold start and interacts with the database through direct SQLAlchemy sessions (not via a service layer). File uploads are saved to `data/uploads/`; OCR outputs go to `data/processed/`.
 
@@ -85,3 +100,4 @@ Start a conversation with `product-owner` for strategic work and feature plannin
 - **Python target**: 3.8+ syntax.
 - The database file (`church_music.db`) is created in the working directory at runtime — not committed to the repo.
 - System dependencies required locally: `tesseract-ocr` with `tesseract-ocr-pol` and `tesseract-ocr-eng` language packs, `poppler-utils` (pdf2image), `libmagic`. See `Dockerfile` for the canonical install commands.
+- **LLM steps (2/4/5)** require the `google-genai` package plus a Gemini API key (`GEMINI_API_KEY` or `GOOGLE_API_KEY`, from Google AI Studio). When absent, `PipelineService.llm_available()` is `False`, the LLM buttons are disabled, and cascade steps 2/4/5 are skipped — OCR (1) and OMR (3) still run standalone.
