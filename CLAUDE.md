@@ -66,9 +66,9 @@ Gemini-powered agents. Runnable as a cascade (`PipelineService.run_full`) or ste
 2. **LLM clean text** → `MusicPiece.lyrics` — `src/llm/lyrics_cleaner.py` (structured output: language + cleaned lyrics)
 3. **OMR** (Audiveris) → MusicXML — `OMRService` *(existing)*
 4. **LLM correct score** → new `MusicFile(XML)` + change report — `src/llm/score_corrector.py`
-5. **LLM underlay lyrics + validate** → new `MusicFile(XML)` — `src/llm/lyric_underlayer.py`
+5. **LLM align + programmatic underlay** → new `MusicFile(XML)` — `src/llm/lyric_underlayer.py` (LLM returns a syllable-per-onset plan; music21 inserts `<lyric>` and re-exports — output size is bounded by the score, not the token budget)
 
-- `src/llm/client.py`: `LLMClient` wraps the Google Gemini SDK `google-genai` (imported lazily). `llm_available()` gates the UI like `tesseract_available()`/`audiveris_available()`. Steps 4/5 use streaming (`generate_content_stream`); step 2 uses structured outputs (`response_schema` + `response.parsed`).
+- `src/llm/client.py`: `LLMClient` wraps the Google Gemini SDK `google-genai` (imported lazily). `llm_available()` gates the UI like `tesseract_available()`/`audiveris_available()`. Step 4 streams text (`generate_content_stream`); steps 2/5 use structured outputs (`response_schema` + `response.parsed`). "Thinking" is disabled by default (`thinking_budget=0`, override via `CMO_LLM_THINKING_BUDGET`) so the output budget is not starved; noisy OCR is pre-filtered before step 2 to avoid Gemini's `PROHIBITED_CONTENT` prompt filter.
 - `src/llm/musicxml_validate.py`: `load_musicxml_text()` decompresses `.mxl`; `validate_musicxml()` round-trips LLM output through music21 — **invalid output is rejected and the previous good file is kept** (steps 4/5 never overwrite the original OMR file; they always write a NEW `MusicFile`).
 - **Auth**: default `genai.Client()` is zero-config — it reads `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) from the environment. No key in code. `.env` is loaded by `client.py` on import.
 - **Config (.env)**: `GEMINI_API_KEY` (required), `CMO_LLM_MODEL` (default `gemini-2.5-flash`), and per-step overrides `CMO_LLM_MODEL_TEXT` / `CMO_LLM_MODEL_SCORE` / `CMO_LLM_MODEL_LYRICS`.
