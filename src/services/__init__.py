@@ -4,6 +4,7 @@ from .music_piece_service import MusicPieceService
 from .ocr_service import OCRService
 from .omr_service import OMRService
 from .pipeline_service import PipelineService
+from .processing_step_service import ProcessingStepService
 
 __all__ = [
     "AnalysisService",
@@ -12,4 +13,5 @@ __all__ = [
     "OCRService",
     "OMRService",
     "PipelineService",
+    "ProcessingStepService",
 ]

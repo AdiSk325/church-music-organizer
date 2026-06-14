@@ -12,7 +12,7 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from src.database.models import Base, FileType, MusicFile, MusicPiece
+from src.database.models import Base, FileType, MusicFile, MusicPiece, ProcessingStep
 from src.services.pipeline_service import PipelineService
 
 
@@ -231,6 +231,10 @@ class TestRunFull:
         assert db_session.get(MusicPiece, pdf_file.music_piece_id).lyrics == "Tekst"
         # Two new XML files (corrected + final).
         assert db_session.query(MusicFile).filter_by(file_type=FileType.XML).count() == 2
+
+        # Every step is persisted as a ProcessingStep row for the UI to read back.
+        keys = {r.step_key for r in db_session.query(ProcessingStep).all()}
+        assert {"ocr", "clean_text", "omr", "correct_score", "underlay"} <= keys
 
     def test_no_omr_output_skips_steps_4_and_5(self, db_session, pdf_file, monkeypatch):
         _patch_engines(monkeypatch, omr_xml=None)

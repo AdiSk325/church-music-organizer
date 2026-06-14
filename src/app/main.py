@@ -15,7 +15,14 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from sqlalchemy import func  # noqa: F401 — kept for future use
 
 from src.database import FileType, MusicFile, MusicPiece, Tag, UsageHistory, get_db_session, init_db
-from src.services import FileService, OCRService, OMRService, PipelineService
+from src.services import (
+    FileService,
+    OCRService,
+    OMRService,
+    PipelineService,
+    ProcessingStepService,
+)
+from src.services.pipeline_service import STEP_LABELS, STEP_SEQUENCE
 
 logger = logging.getLogger(__name__)
 
@@ -142,6 +149,86 @@ def attach_files(db, piece_id: int, uploaded_files, description: str = "") -> li
 UPLOAD_TYPES = ["pdf", "png", "jpg", "jpeg", "tiff", "bmp", "mscz", "mscx", "xml", "musicxml"]
 # File types that OCR / OMR can process
 OCR_TYPES = {FileType.SCAN, FileType.PDF}
+
+
+# ---------------------------------------------------------------------------
+# Processing-status rendering (reads persisted ProcessingStep rows)
+# ---------------------------------------------------------------------------
+
+_STATUS_ICON = {"ok": "✅", "skipped": "⏭️", "error": "❌"}
+
+
+def _fmt_duration(ms) -> str:
+    """Human-readable wall-clock time for a step."""
+    if not ms:
+        return ""
+    seconds = ms / 1000
+    return f"{seconds:.1f}s" if seconds >= 0.1 else f"{ms} ms"
+
+
+def render_processing_panel(latest_steps: dict) -> None:
+    """Render the persistent pipeline-status panel from the newest step per key."""
+    if not latest_steps:
+        st.info(
+            "Ten utwór nie był jeszcze przetwarzany. Uruchom pełny pipeline lub pojedyncze "
+            "kroki (OCR / OMR) poniżej."
+        )
+        return
+
+    for key in STEP_SEQUENCE:
+        step = latest_steps.get(key)
+        label = STEP_LABELS.get(key, key)
+        if step is None:
+            st.markdown(f"⬜ **{label}** — _nie uruchomiono_")
+            continue
+        icon = _STATUS_ICON.get(step.status, "•")
+        dur = _fmt_duration(step.duration_ms)
+        dur_txt = f" · ⏱ {dur}" if dur else ""
+        st.markdown(f"{icon} **{label}** — {step.detail or ''}{dur_txt}")
+        if step.report:
+            with st.expander(f"📋 Raport: {label}"):
+                st.markdown(step.report)
+
+
+def render_analysis(data: dict) -> None:
+    """Render the full ScoreDescriptor (analysis step ``data_json``)."""
+    if not data:
+        return
+
+    col1, col2 = st.columns(2)
+    with col1:
+        key = data.get("detected_key") or "—"
+        conf = data.get("key_confidence")
+        conf_txt = f" (pewność {conf:.0%})" if isinstance(conf, (int, float)) else ""
+        st.write(f"**Tonacja:** {key}{conf_txt}")
+        st.write(f"**Tryb:** {data.get('mode') or '—'}")
+        ts = ", ".join(data.get("time_signatures") or []) or "—"
+        st.write(f"**Metrum:** {ts}")
+        st.write(f"**Faktura:** {data.get('texture_type') or '—'}")
+        st.write(f"**Epoka harmoniczna:** {data.get('harmony_epoch') or '—'}")
+    with col2:
+        voices = ", ".join(data.get("voice_names") or []) or "—"
+        st.write(f"**Głosy ({data.get('voice_count') or 0}):** {voices}")
+        st.write(f"**Forma:** {data.get('form_type') or '—'}")
+        grade = data.get("grade_label") or "—"
+        st.write(f"**Trudność:** {grade} (grade {data.get('estimated_grade') or '—'})")
+        chrom = data.get("chromatic_complexity")
+        if isinstance(chrom, (int, float)):
+            st.write(f"**Złożoność chromatyczna:** {chrom:.2f}")
+        st.write(f"**Tekst:** {data.get('text_setting_type') or '—'}")
+
+    ranges = data.get("voice_ranges") or []
+    factors = data.get("difficulty_factors") or []
+    if ranges or factors:
+        with st.expander("🔬 Szczegóły analizy"):
+            for vr in ranges:
+                st.write(
+                    f"- **{vr.get('name', '?')}:** {vr.get('lowest_pitch', '?')}–"
+                    f"{vr.get('highest_pitch', '?')} "
+                    f"(zakres {vr.get('range_semitones', '?')} półtonów)"
+                )
+            if factors:
+                st.write("**Czynniki trudności:** " + ", ".join(factors))
 
 
 # ---------------------------------------------------------------------------
@@ -489,6 +576,10 @@ elif page == "Song Details":
             piece = db.query(MusicPiece).filter_by(id=selected_piece_id).first()
 
             if piece:
+                # Persisted pipeline results (newest per step) — drives the status panel
+                # and per-section intermediate results below; survives page reloads.
+                latest_steps = ProcessingStepService.latest_by_key(db, selected_piece_id)
+
                 # --- DESCRIPTION & METADATA ---
                 st.subheader("📝 Description & Metadata")
                 col1, col2 = st.columns(2)
@@ -518,6 +609,15 @@ elif page == "Song Details":
                     st.markdown(f"**Description:** {piece.description}")
                 if piece.notes:
                     st.markdown(f"**Notes:** {piece.notes}")
+
+                # Full automatic score analysis (persisted from the OMR analysis step).
+                _analysis_step = latest_steps.get("analysis")
+                _analysis_data = ProcessingStepService.data(_analysis_step)
+                if _analysis_data:
+                    st.markdown("**🔎 Analiza muzyczna (automatyczna):**")
+                    render_analysis(_analysis_data)
+                    if _analysis_step.report:
+                        st.caption(_analysis_step.report)
 
                 st.markdown("---")
 
@@ -557,49 +657,29 @@ elif page == "Song Details":
                 # --- OMR / OCR PROCESSING ---
                 st.subheader("🎼 OMR / OCR Processing")
 
-                # Flash the result of a just-completed OMR run (survives st.rerun()).
-                _flash = st.session_state.pop("omr_flash", None)
+                # Brief toast after a just-finished run (the durable results render below).
+                _flash = st.session_state.pop("processing_flash", None)
                 if _flash and _flash.get("piece_id") == selected_piece_id:
-                    st.success(
-                        "✅ OMR zakończony — plik MusicXML zapisano i powiązano z utworem; "
-                        "metadane utworu uzupełniono automatyczną analizą."
-                    )
-                    _an = (_flash.get("result") or {}).get("analysis")
-                    if _an:
-                        _ts = ", ".join(_an.get("time_signatures") or []) or "—"
-                        _voices = ", ".join(_an.get("voice_names") or []) or "—"
-                        st.markdown(
-                            "**🔎 Automatyczna analiza muzyczna:**\n"
-                            f"- Tonacja: **{_an.get('detected_key') or '—'}** "
-                            f"(pewność {_an.get('key_confidence', 0):.0%})\n"
-                            f"- Metrum: **{_ts}** | Takty: **{_an.get('measure_count') or '—'}**\n"
-                            f"- Głosy ({_an.get('voice_count') or 0}): {_voices}\n"
-                            f"- Faktura: **{_an.get('texture_type') or '—'}** | "
-                            f"Epoka: **{_an.get('harmony_epoch') or '—'}**\n"
-                            f"- Język tekstu: **{_an.get('lyrics_language') or '—'}** | "
-                            f"Trudność: **{_an.get('grade_label') or '—'}** "
-                            f"(grade {_an.get('estimated_grade') or '—'})"
-                        )
-                        if _an.get("narrative"):
-                            st.caption(_an["narrative"])
-                    else:
-                        st.info(
-                            "Plik skonwertowany, ale automatyczna analiza się nie powiodła "
-                            "(sprawdź logi). Możesz uzupełnić metadane ręcznie."
-                        )
+                    st.success(_flash.get("message", "✅ Przetwarzanie zakończone."))
 
-                # Flash the result of a just-completed full-pipeline run.
-                _pipe_flash = st.session_state.pop("pipeline_flash", None)
-                if _pipe_flash and _pipe_flash.get("piece_id") == selected_piece_id:
-                    st.success("✅ Pipeline zakończony — podsumowanie kroków poniżej:")
-                    _icons = {"ok": "✅", "skipped": "⏭️", "error": "❌"}
-                    for _step in _pipe_flash.get("steps", []):
-                        _ico = _icons.get(_step.get("status"), "•")
-                        st.markdown(f"{_ico} **{_step.get('name')}** — {_step.get('detail', '')}")
-                        _report = _step.get("report")
-                        if _report:
-                            with st.expander(f"📋 Raport: {_step.get('name')}"):
-                                st.markdown(_report)
+                # Persistent processing-status panel (reads ProcessingStep rows — survives
+                # reloads, unlike the old transient flash).
+                st.markdown("**🔄 Status przetwarzania:**")
+                render_processing_panel(latest_steps)
+
+                # Persisted OCR text per source file (read from the DB, not just after a run).
+                for _src in pdf_files + scan_files:
+                    if _src.extracted_text:
+                        with st.expander(f"📄 Tekst OCR — {_src.original_filename}"):
+                            st.text_area(
+                                "Tekst OCR",
+                                value=_src.extracted_text,
+                                height=180,
+                                key=f"ocrtext_{_src.id}",
+                                disabled=True,
+                            )
+
+                st.markdown("---")
 
                 _omr_avail = OMRService.is_available()
                 _ocr_avail = OCRService.is_available()
@@ -645,26 +725,38 @@ elif page == "Song Details":
                             "(LLM) → podkład tekstu (LLM). Kroki bez dostępnego silnika są "
                             "pomijane.",
                         ):
-                            with st.spinner(
-                                "Uruchamiam pełny pipeline (OCR, czyszczenie tekstu, OMR, "
-                                "korekta partytury, podkład tekstu)... to może potrwać kilka minut."
-                            ):
-                                try:
-                                    with get_db_session() as db2:
-                                        pipe_res = PipelineService().run_full(db2, proc_file.id)
-                                        db2.commit()
-                                        st.session_state["pipeline_flash"] = {
-                                            "piece_id": selected_piece_id,
-                                            "steps": pipe_res.get("steps", []),
-                                        }
-                                        st.rerun()
-                                except Exception as _exc:
-                                    logger.exception("Pipeline failed for file_id=%s", proc_file.id)
-                                    st.error(f"Błąd pipeline: {str(_exc)}")
+                            # Live progress bar driven by run_full's on_progress callback.
+                            _total = 5  # ocr, clean_text, omr, correct_score, underlay
+                            _prog = st.progress(0.0, text="Uruchamiam pipeline…")
+                            _counter = {"n": 0}
+
+                            def _on_progress(name, status, _p=_prog, _c=_counter, _t=_total):
+                                _c["n"] += 1
+                                _ico = _STATUS_ICON.get(status, "•")
+                                _p.progress(
+                                    min(_c["n"] / _t, 1.0),
+                                    text=f"{_ico} {name} — {status}",
+                                )
+
+                            try:
+                                with get_db_session() as db2:
+                                    PipelineService().run_full(
+                                        db2, proc_file.id, on_progress=_on_progress
+                                    )
+                                    db2.commit()
+                                _prog.progress(1.0, text="✅ Zakończono.")
+                                st.session_state["processing_flash"] = {
+                                    "piece_id": selected_piece_id,
+                                    "message": "✅ Pełny pipeline zakończony — wyniki poniżej.",
+                                }
+                                st.rerun()
+                            except Exception as _exc:
+                                logger.exception("Pipeline failed for file_id=%s", proc_file.id)
+                                st.error(f"Błąd pipeline: {str(_exc)}")
 
                         _btn_omr, _btn_ocr = st.columns(2)
 
-                        # OMR button — converts PDF/scan to MusicXML via Audiveris
+                        # OMR button — converts PDF/scan to MusicXML via Audiveris (persisted)
                         if _btn_omr.button(
                             "🎼 Uruchom OMR → MusicXML",
                             key=f"omr_{proc_file.id}",
@@ -676,30 +768,22 @@ elif page == "Song Details":
                             ):
                                 try:
                                     with get_db_session() as db2:
-                                        omr_res = OMRService().process_file(db2, proc_file.id)
-                                        if omr_res is None:
-                                            st.error(
-                                                "Błąd OMR: nie znaleziono pliku "
-                                                f"(ID={proc_file.id}) w bazie danych."
-                                            )
-                                        elif not omr_res.get("success"):
-                                            st.error(
-                                                "Błąd OMR: " + omr_res.get("error", "nieznany błąd")
-                                            )
-                                        else:
-                                            db2.commit()
-                                            # Stash the result; rendered after rerun so
-                                            # the new file + updated metadata are visible.
-                                            st.session_state["omr_flash"] = {
-                                                "piece_id": selected_piece_id,
-                                                "result": omr_res,
-                                            }
-                                            st.rerun()
+                                        r3 = PipelineService().run_step3_omr(db2, proc_file.id)
+                                        db2.commit()
+                                    if r3.get("status") == "ok":
+                                        st.session_state["processing_flash"] = {
+                                            "piece_id": selected_piece_id,
+                                            "message": "✅ OMR zakończony — MusicXML i analiza "
+                                            "zapisane.",
+                                        }
+                                        st.rerun()
+                                    else:
+                                        st.error("Błąd OMR: " + r3.get("detail", "nieznany błąd"))
                                 except Exception as _exc:
                                     logger.exception("OMR failed for file_id=%s", proc_file.id)
                                     st.error(f"Błąd przetwarzania OMR: {str(_exc)}")
 
-                        # OCR button — extracts text via Tesseract
+                        # OCR button — extracts text via Tesseract (persisted)
                         if _btn_ocr.button(
                             "📝 Uruchom OCR → tekst",
                             key=f"ocr_{proc_file.id}",
@@ -710,36 +794,19 @@ elif page == "Song Details":
                             ):
                                 try:
                                     with get_db_session() as db2:
-                                        ocr_res = OCRService().process_file(db2, proc_file.id)
-                                        if ocr_res is None:
-                                            st.error(
-                                                "Błąd OCR: nie udało się przetworzyć pliku "
-                                                f"'{proc_file.original_filename}'. "
-                                                "Sprawdź logi aplikacji."
-                                            )
-                                        else:
-                                            db2.commit()
-                                            _conf = ocr_res.get("confidence", 0)
-                                            _has_not = ocr_res.get("has_music_notation", False)
-                                            _suffix = " | Wykryto zapis nutowy" if _has_not else ""
-                                            st.success(
-                                                f"✅ OCR zakończony. Pewność: {_conf}%" + _suffix
-                                            )
-                                            _ocr_text = ocr_res.get("text", "")
-                                            if _ocr_text:
-                                                with st.expander(
-                                                    "📄 Wyekstrahowany tekst",
-                                                    expanded=True,
-                                                ):
-                                                    st.text_area(
-                                                        "Tekst OCR",
-                                                        value=_ocr_text,
-                                                        height=200,
-                                                        key=f"ocr_text_{proc_file.id}",
-                                                        disabled=True,
-                                                    )
-                                            else:
-                                                st.info("OCR nie wykrył żadnego tekstu " "w pliku.")
+                                        r1 = PipelineService().run_step1_ocr(db2, proc_file.id)
+                                        db2.commit()
+                                    if r1.get("status") == "ok":
+                                        st.session_state["processing_flash"] = {
+                                            "piece_id": selected_piece_id,
+                                            "message": f"✅ OCR zakończony — {r1.get('detail', '')}",
+                                        }
+                                        st.rerun()
+                                    else:
+                                        st.error(
+                                            "Błąd OCR: nie udało się przetworzyć pliku "
+                                            f"'{proc_file.original_filename}'. Sprawdź logi."
+                                        )
                                 except Exception as _exc:
                                     logger.exception("OCR failed for file_id=%s", proc_file.id)
                                     st.error(f"Błąd przetwarzania OCR: {str(_exc)}")
@@ -753,21 +820,22 @@ elif page == "Song Details":
                             disabled=not (_llm_avail and _has_ocr_text),
                             help=None if _has_ocr_text else "Najpierw uruchom OCR.",
                         ):
-                            with st.spinner("Czyszczenie tekstu przez Claude..."):
+                            with st.spinner("Czyszczenie tekstu przez Gemini..."):
                                 try:
                                     with get_db_session() as db2:
                                         r2 = PipelineService().run_step2_clean_text(
                                             db2,
                                             selected_piece_id,
                                             proc_file.extracted_text or "",
+                                            source_file_id=proc_file.id,
                                         )
                                         db2.commit()
                                     if r2.get("status") == "ok":
-                                        st.success(
-                                            f"✅ Tekst oczyszczony (język: {r2.get('language')})."
-                                        )
-                                        if r2.get("detail"):
-                                            st.caption(r2["detail"])
+                                        st.session_state["processing_flash"] = {
+                                            "piece_id": selected_piece_id,
+                                            "message": "✅ Tekst oczyszczony (język: "
+                                            f"{r2.get('language')}).",
+                                        }
                                         st.rerun()
                                     else:
                                         st.info(r2.get("detail", "Pominięto."))
@@ -786,39 +854,35 @@ elif page == "Song Details":
                             disabled=not (_llm_avail and _piece_xml is not None),
                             help=None if _piece_xml else "Najpierw uruchom OMR.",
                         ):
-                            with st.spinner("Korekta partytury i podkład tekstu przez Claude..."):
+                            with st.spinner("Korekta partytury i podkład tekstu przez Gemini..."):
                                 try:
                                     with get_db_session() as db2:
                                         svc = PipelineService()
                                         r4 = svc.run_step4_correct_score(
-                                            db2, selected_piece_id, _piece_xml.file_path
+                                            db2,
+                                            selected_piece_id,
+                                            _piece_xml.file_path,
+                                            source_file_id=_piece_xml.id,
                                         )
-                                        steps = [{"name": "4. Korekta partytury (LLM)", **r4}]
                                         _has_lyrics = bool((piece.lyrics or "").strip())
                                         if r4.get("status") == "ok" and _has_lyrics:
-                                            r5 = svc.run_step5_underlay(
+                                            svc.run_step5_underlay(
                                                 db2,
                                                 selected_piece_id,
                                                 piece.lyrics,
                                                 xml_path=_piece_xml.file_path,
                                                 xml_content=r4.get("musicxml"),
-                                            )
-                                            steps.append({"name": "5. Podkład tekstu (LLM)", **r5})
-                                        elif not _has_lyrics:
-                                            steps.append(
-                                                {
-                                                    "name": "5. Podkład tekstu (LLM)",
-                                                    "status": "skipped",
-                                                    "detail": "Brak tekstu utworu — "
-                                                    "najpierw oczyść tekst (krok 2).",
-                                                }
+                                                source_file_id=_piece_xml.id,
                                             )
                                         db2.commit()
-                                        st.session_state["pipeline_flash"] = {
-                                            "piece_id": selected_piece_id,
-                                            "steps": steps,
-                                        }
-                                        st.rerun()
+                                    _msg = "✅ Korekta partytury zakończona."
+                                    if not _has_lyrics:
+                                        _msg += " Podkład pominięto — brak tekstu (oczyść tekst)."
+                                    st.session_state["processing_flash"] = {
+                                        "piece_id": selected_piece_id,
+                                        "message": _msg,
+                                    }
+                                    st.rerun()
                                 except Exception as _exc:
                                     logger.exception("score correct/underlay failed")
                                     st.error(f"Błąd korekty/podkładu: {str(_exc)}")
@@ -832,7 +896,16 @@ elif page == "Song Details":
                 xml_files = [f for f in piece.files if f.file_type == FileType.XML]
                 if xml_files:
                     st.write("**Wygenerowane pliki MusicXML:**")
+                    # Map produced-file id → the step that created it (provenance).
+                    _provenance = {
+                        s.output_file_id: s.step_label
+                        for s in latest_steps.values()
+                        if s.output_file_id
+                    }
                     for xml_file in xml_files:
+                        _prov = _provenance.get(xml_file.id)
+                        if _prov:
+                            st.caption(f"↳ pochodzi z kroku: {_prov}")
                         _xml_disk = Path(xml_file.file_path)
                         if _xml_disk.exists():
                             st.download_button(
@@ -879,6 +952,13 @@ elif page == "Song Details":
                     st.text(piece.lyrics)
                 else:
                     st.info("No lyrics available for this piece.")
+
+                # Persisted text-cleaning report (step 2), if the LLM ran.
+                _clean_step = latest_steps.get("clean_text")
+                if _clean_step and _clean_step.report:
+                    with st.expander("🧹 Raport czyszczenia tekstu (LLM)"):
+                        st.caption(f"Status: {_clean_step.status} · {_clean_step.detail or ''}")
+                        st.markdown(_clean_step.report)
 
                 st.markdown("---")
 

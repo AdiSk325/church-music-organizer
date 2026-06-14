@@ -274,4 +274,7 @@ class OMRService:
             "estimated_grade": descriptor.estimated_grade,
             "grade_label": descriptor.grade_label,
             "narrative": narrative,
+            # Full descriptor for persistence (PipelineService stores it as the
+            # `analysis` step's data_json so the whole analysis survives reloads).
+            "descriptor_full": descriptor.to_dict(),
         }
