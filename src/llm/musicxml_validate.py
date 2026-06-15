@@ -231,3 +231,23 @@ def export_score_to_mxl(score) -> bytes:
         return result_path.read_bytes()
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def export_score_to_musicxml(score) -> str:
+    """Zapisz obiekt music21 ``Score`` do NIESKOMPRESOWANEGO ``.musicxml`` i zwróć tekst.
+
+    Nieskompresowany MusicXML jest preferowanym formatem wynikowym pipeline'u: można go
+    przeglądać i edytować element po elemencie oraz precyzyjnie porównywać (diff) z referencją.
+    MuseScore otwiera go tak samo jak ``.mxl``.
+
+    Raises:
+        Exception: gdy music21 nie może wyeksportować lub odczytać wyniku.
+    """
+    tmpdir = tempfile.mkdtemp(prefix="cmo_xml_")
+    out_path = Path(tmpdir) / "score.musicxml"
+    try:
+        written = score.write("musicxml", fp=str(out_path))
+        result_path = Path(written) if written else out_path
+        return result_path.read_text(encoding="utf-8")
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)

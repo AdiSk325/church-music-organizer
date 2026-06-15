@@ -21,9 +21,18 @@ from typing import Optional
 
 
 def _extract(score) -> dict:
-    """Structural facts used by the comparison metrics."""
+    """Structural facts used by the comparison metrics, incl. lyric coverage."""
     parts = list(score.parts)
-    notes = sum(1 for _ in score.flatten().notes)
+    total_notes = 0
+    notes_with_lyrics = 0
+    parts_with_lyrics = 0
+    for p in parts:
+        pnotes = list(p.recurse().notes)
+        plyr = sum(1 for n in pnotes if getattr(n, "lyrics", None))
+        total_notes += len(pnotes)
+        notes_with_lyrics += plyr
+        if plyr:
+            parts_with_lyrics += 1
     measures = max((len(list(p.getElementsByClass("Measure"))) for p in parts), default=0)
     flat = score.flatten()
     ts = [t.ratioString for t in flat.getElementsByClass("TimeSignature")]
@@ -31,10 +40,13 @@ def _extract(score) -> dict:
     fifths = getattr(keysigs[0], "sharps", None) if keysigs else None
     return {
         "parts": len(parts),
-        "notes": notes,
+        "notes": total_notes,
         "measures": measures,
         "first_ts": ts[0] if ts else None,
         "fifths": fifths,
+        "notes_with_lyrics": notes_with_lyrics,
+        "parts_with_lyrics": parts_with_lyrics,
+        "lyric_coverage": round(notes_with_lyrics / total_notes, 3) if total_notes else 0.0,
     }
 
 
@@ -82,10 +94,19 @@ def compare_musicxml(reference_path: str, candidate_path: str) -> dict:
     key_match = ref_fifths == conv_fifths
     ts_match = r["first_ts"] is not None and r["first_ts"] == c["first_ts"]
     part_match = r["parts"] == c["parts"]
+
+    # Lyric coverage relative to the reference: how much of the text the reference carries did
+    # we reproduce under notes. Essential for choral music. 1.0 when the reference itself has
+    # no lyrics (nothing to reproduce).
+    ref_cov = r["lyric_coverage"]
+    conv_cov = c["lyric_coverage"]
+    lyric_coverage_ratio = round(min(1.0, conv_cov / ref_cov), 3) if ref_cov > 0 else 1.0
+
     overall = (
-        min(1.0, note_recall) * 0.5
-        + (0.2 if key_match else 0.0)
-        + (0.15 if ts_match else 0.0)
+        min(1.0, note_recall) * 0.4
+        + lyric_coverage_ratio * 0.2
+        + (0.15 if key_match else 0.0)
+        + (0.1 if ts_match else 0.0)
         + (0.15 if part_match else 0.0)
     )
 
@@ -101,5 +122,8 @@ def compare_musicxml(reference_path: str, candidate_path: str) -> dict:
         "key_match": key_match,
         "ts_match": ts_match,
         "part_match": part_match,
+        "lyric_coverage_ref": ref_cov,
+        "lyric_coverage_conv": conv_cov,
+        "lyric_coverage_ratio": lyric_coverage_ratio,
         "overall_score": round(overall, 3),
     }

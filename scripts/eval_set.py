@@ -32,25 +32,6 @@ OMR_OUT = Path("data/processed/eval/omr")
 OUT = Path("data/processed/eval")
 
 
-def extract(score) -> dict:
-    parts = list(score.parts)
-    notes = sum(1 for _ in score.flatten().notes)
-    measures = max((len(list(p.getElementsByClass("Measure"))) for p in parts), default=0)
-    flat = score.flatten()
-    ts = [t.ratioString for t in flat.getElementsByClass("TimeSignature")]
-    ks = list(flat.getElementsByClass("KeySignature"))
-    fifths = None
-    if ks:
-        fifths = getattr(ks[0], "sharps", None)
-    return {
-        "parts": len(parts),
-        "notes": notes,
-        "measures": measures,
-        "first_ts": ts[0] if ts else None,
-        "fifths": fifths,
-    }
-
-
 def run_omr(pdf: Path) -> Optional[str]:
     """Run Audiveris (cached). Returns path to converted .mxl or None."""
     OMR_OUT.mkdir(parents=True, exist_ok=True)
@@ -64,55 +45,9 @@ def run_omr(pdf: Path) -> Optional[str]:
 
 
 def compare(ref_path: Path, conv_path: str) -> dict:
-    from music21 import converter
+    from src.evaluation.reference_compare import compare_musicxml
 
-    from src.llm.musicxml_validate import load_musicxml_text, validate_musicxml
-
-    # Validity / format of the converted output
-    is_mxl = Path(conv_path).suffix.lower() == ".mxl"
-    valid = False
-    valid_reason = None
-    try:
-        ok, reason, _score = validate_musicxml(load_musicxml_text(conv_path))
-        valid, valid_reason = ok, reason
-    except Exception as exc:
-        valid_reason = f"load/validate error: {exc}"
-
-    ref = converter.parse(str(ref_path))
-    conv = converter.parse(conv_path)
-    r = extract(ref)
-    c = extract(conv)
-
-    note_recall = min(c["notes"], r["notes"]) / r["notes"] if r["notes"] else 0.0
-    note_ratio = c["notes"] / r["notes"] if r["notes"] else 0.0
-    measure_match = abs(c["measures"] - r["measures"]) <= 1
-    # No <key> element ≡ 0 fifths (no sharps/flats) — normalise None→0 so a missing key
-    # signature is not falsely counted as a mismatch against a C-major/0-accidental ref.
-    ref_fifths = r["fifths"] if r["fifths"] is not None else 0
-    conv_fifths = c["fifths"] if c["fifths"] is not None else 0
-    key_match = ref_fifths == conv_fifths
-    ts_match = r["first_ts"] is not None and r["first_ts"] == c["first_ts"]
-    part_match = r["parts"] == c["parts"]
-    overall = (
-        min(1.0, note_recall) * 0.5
-        + (0.2 if key_match else 0.0)
-        + (0.15 if ts_match else 0.0)
-        + (0.15 if part_match else 0.0)
-    )
-    return {
-        "valid_musicxml": valid,
-        "valid_reason": valid_reason,
-        "is_mxl": is_mxl,
-        "ref": r,
-        "conv": c,
-        "note_recall": round(note_recall, 3),
-        "note_ratio": round(note_ratio, 3),
-        "measure_match": measure_match,
-        "key_match": key_match,
-        "ts_match": ts_match,
-        "part_match": part_match,
-        "overall_score": round(overall, 3),
-    }
+    return compare_musicxml(str(ref_path), conv_path)
 
 
 def main() -> None:

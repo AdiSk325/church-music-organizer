@@ -33,7 +33,7 @@ from sqlalchemy.orm import Session
 
 from src.database.models import FileType, MusicFile, MusicPiece, ProcessingStep
 from src.llm.client import llm_available
-from src.llm.musicxml_validate import export_score_to_mxl, load_musicxml_text
+from src.llm.musicxml_validate import export_score_to_musicxml, load_musicxml_text
 from src.services.file_service import FileService
 from src.services.ocr_service import OCRService
 from src.services.omr_service import OMRService
@@ -292,7 +292,7 @@ class PipelineService:
                 "detail": detail,
             }
 
-        record = self._save_mxl(
+        record = self._save_musicxml(
             db,
             piece_id,
             self._derived_name(xml_path, prefix="corrected"),
@@ -374,7 +374,7 @@ class PipelineService:
             }
 
         base = xml_path or "score.xml"
-        record = self._save_mxl(
+        record = self._save_musicxml(
             db,
             piece_id,
             self._derived_name(base, prefix="final"),
@@ -537,7 +537,7 @@ class PipelineService:
             f"faktura: {descriptor.texture_type or '?'}."
         )
 
-    def _save_mxl(
+    def _save_musicxml(
         self,
         db: Session,
         piece_id: int,
@@ -546,37 +546,31 @@ class PipelineService:
         description: str,
         score=None,
     ) -> MusicFile:
-        """Persist a corrected score as compressed ``.mxl`` (MuseScore-compatible).
+        """Persist a score as UNCOMPRESSED ``.musicxml`` (inspectable, MuseScore-compatible).
 
-        The canonical output is ``.mxl`` written from a music21 ``Score``. When ``score``
-        is provided (from a step 4/5 result) it is exported directly; otherwise ``xml_text``
-        is re-parsed. If the .mxl export fails for any reason the raw ``xml_text`` is saved
-        as ``.xml`` so no result is ever lost.
+        The canonical output is plain ``.musicxml`` written from a music21 ``Score`` so every
+        element can be reviewed/edited and diffed precisely against a reference. When ``score``
+        is provided (from a step 4/5 result) it is exported directly; otherwise ``xml_text`` is
+        re-parsed. If normalisation fails the raw ``xml_text`` is saved as-is so nothing is lost.
         """
-        mxl_bytes: Optional[bytes] = None
-        actual_filename = filename
-        mime = "application/vnd.recordare.musicxml"  # compressed MXL
-
+        out_text: Optional[str] = None
         try:
             if score is None:
                 from music21 import converter
 
                 score = converter.parseData(xml_text, format="musicxml")
-            mxl_bytes = export_score_to_mxl(score)
+            out_text = export_score_to_musicxml(score)
         except Exception:
             logger.warning(
-                "pipeline: konwersja do .mxl nie powiodła się — zapis jako .xml",
+                "pipeline: normalizacja do .musicxml nie powiodła się — zapis surowego XML",
                 exc_info=True,
             )
-            if actual_filename.lower().endswith(".mxl"):
-                actual_filename = actual_filename[:-4] + ".xml"
-            mime = "application/vnd.recordare.musicxml+xml"
+            out_text = xml_text
 
-        file_data = mxl_bytes if mxl_bytes is not None else xml_text.encode("utf-8")
         stored_path = FileService.save_uploaded_file(
             piece_id=piece_id,
-            filename=actual_filename,
-            file_data=file_data,
+            filename=filename,
+            file_data=out_text.encode("utf-8"),
         )
         path = Path(stored_path)
         record = MusicFile(
@@ -585,7 +579,7 @@ class PipelineService:
             file_type=FileType.XML,
             original_filename=path.name,
             file_size=path.stat().st_size if path.exists() else None,
-            mime_type=mime,
+            mime_type="application/vnd.recordare.musicxml+xml",
             description=description,
             is_processed=1,
         )
@@ -596,9 +590,9 @@ class PipelineService:
 
     @staticmethod
     def _derived_name(source_path: str, *, prefix: str) -> str:
-        """Build a ``<prefix>_<stem>.mxl`` filename from a source path."""
+        """Build a ``<prefix>_<stem>.musicxml`` filename from a source path."""
         stem = Path(source_path).stem or "score"
-        return f"{prefix}_{stem}.mxl"
+        return f"{prefix}_{stem}.musicxml"
 
 
 def _analysis_detail(analysis: dict) -> str:
