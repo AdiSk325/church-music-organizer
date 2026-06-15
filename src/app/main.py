@@ -954,12 +954,14 @@ elif page == "Song Details":
                             None,
                         )
                         if _btn_score.button(
-                            "🎶 Korekta + podkład (LLM)",
+                            "🎶 Korekta (LLM) + podkład tekstu",
                             key=f"score_{proc_file.id}",
                             disabled=not (_llm_avail and _piece_xml is not None),
                             help=None if _piece_xml else "Najpierw uruchom OMR.",
                         ):
-                            with st.spinner("Korekta partytury i podkład tekstu przez Gemini..."):
+                            with st.spinner(
+                                "Korekta partytury (LLM) + algorytmiczny podkład tekstu..."
+                            ):
                                 try:
                                     with get_db_session() as db2:
                                         svc = PipelineService()
@@ -997,10 +999,15 @@ elif page == "Song Details":
                         "Wgraj plik w sekcji 'Upload Files' poniżej."
                     )
 
-                # Existing XML files (OMR output) available for download — versioned & dated.
-                xml_files = [f for f in piece.files if f.file_type == FileType.XML]
+                # Generated MusicXML — show ONLY the freshest version of each kind (OMR / korekta
+                # / finalny), so the user sees the current artefacts, not the whole history.
+                xml_files = [
+                    f for f in piece.files
+                    if f.file_type == FileType.XML
+                    and not (f.description or "").startswith("[REFERENCJA]")
+                ]
                 if xml_files:
-                    st.write("**Wygenerowane pliki MusicXML:**")
+                    st.write("**Aktualne pliki MusicXML (najnowsze wersje):**")
                     # Map produced-file id → the step that created it (provenance).
                     _provenance = {
                         s.output_file_id: s.step_label
@@ -1008,36 +1015,34 @@ elif page == "Song Details":
                         if s.output_file_id
                     }
 
+                    # Stable display order of the kinds (OMR → korekta → finalny).
+                    _KIND_ORDER = ["📄 OMR (surowy)", "🛠️ Korekta partytury", "🎶 Finalny (z tekstem)"]
+
                     def _file_kind(f) -> str:
                         name = (f.original_filename or "").lower()
                         if name.startswith("final_"):
                             return "🎶 Finalny (z tekstem)"
                         if name.startswith("corrected_"):
                             return "🛠️ Korekta partytury"
-                        return "📄 MusicXML"
+                        return "📄 OMR (surowy)"
 
-                    # Newest file per kind = the current one to use.
+                    # Keep only the newest file per kind.
                     _newest_per_kind: dict = {}
                     for f in xml_files:
                         k = _file_kind(f)
                         cur = _newest_per_kind.get(k)
-                        if cur is None or (f.created_at and cur.created_at and f.created_at > cur.created_at):
+                        if cur is None or (f.id > cur.id):
                             _newest_per_kind[k] = f
 
-                    # Sort newest first so the most relevant downloads are on top.
-                    for xml_file in sorted(
-                        xml_files, key=lambda f: f.created_at or datetime.min, reverse=True
-                    ):
-                        _kind = _file_kind(xml_file)
+                    for _kind in [k for k in _KIND_ORDER if k in _newest_per_kind]:
+                        xml_file = _newest_per_kind[_kind]
                         _ver = f"v{xml_file.version}" if xml_file.version else "—"
                         _when = (
                             xml_file.created_at.strftime("%Y-%m-%d %H:%M")
                             if xml_file.created_at
                             else "—"
                         )
-                        _is_newest = _newest_per_kind.get(_kind) is xml_file
-                        _badge = "  ✅ **aktualna**" if _is_newest else ""
-                        st.markdown(f"**{_kind}** · {_ver} · 🕒 {_when}{_badge}")
+                        st.markdown(f"**{_kind}** · {_ver} · 🕒 {_when}")
                         _prov = _provenance.get(xml_file.id)
                         if _prov:
                             st.caption(f"↳ pochodzi z kroku: {_prov}")
@@ -1093,34 +1098,95 @@ elif page == "Song Details":
                 if _transl_notes:
                     st.caption(f"Uwagi tłumacza: {_transl_notes}")
 
-                _col_orig, _col_transl = st.columns(2)
-                with _col_orig:
-                    st.markdown("**Tekst oryginalny**")
-                    if piece.lyrics:
-                        st.text_area(
+                # Editable lyrics + translation: fix text quickly, save, then re-run underlay.
+                with st.form(f"edit_lyrics_form_{selected_piece_id}"):
+                    _col_orig, _col_transl = st.columns(2)
+                    with _col_orig:
+                        st.markdown("**Tekst oryginalny** (edytowalny)")
+                        _edit_orig = st.text_area(
                             "tekst_orig",
-                            value=piece.lyrics,
+                            value=piece.lyrics or "",
                             height=220,
-                            disabled=True,
                             label_visibility="collapsed",
                             key=f"orig_{selected_piece_id}",
                         )
-                    else:
-                        st.info("Brak tekstu dla tego utworu.")
-
-                with _col_transl:
-                    st.markdown("**Tłumaczenie (PL)**")
-                    if piece.lyrics_translation_pl:
-                        st.text_area(
+                    with _col_transl:
+                        st.markdown("**Tłumaczenie (PL)** (edytowalne)")
+                        _edit_transl = st.text_area(
                             "tekst_transl",
-                            value=piece.lyrics_translation_pl,
+                            value=piece.lyrics_translation_pl or "",
                             height=220,
-                            disabled=True,
                             label_visibility="collapsed",
                             key=f"transl_{selected_piece_id}",
                         )
-                    else:
-                        st.info("Brak tłumaczenia — kliknij przycisk poniżej.")
+                    if st.form_submit_button("💾 Zapisz teksty"):
+                        try:
+                            with get_db_session() as db2:
+                                _p2 = (
+                                    db2.query(MusicPiece)
+                                    .filter_by(id=selected_piece_id)
+                                    .first()
+                                )
+                                if _p2:
+                                    _p2.lyrics = _edit_orig.strip() or None
+                                    _p2.lyrics_translation_pl = _edit_transl.strip() or None
+                                    db2.commit()
+                            st.session_state["processing_flash"] = {
+                                "piece_id": selected_piece_id,
+                                "message": "✅ Teksty zapisane. Możesz teraz ponownie podłożyć "
+                                "tekst (krok 5).",
+                            }
+                            st.rerun()
+                        except Exception as _exc:
+                            logger.exception("save lyrics failed")
+                            st.error(f"Błąd zapisu tekstów: {str(_exc)}")
+
+                # Underlay the (possibly edited) lyrics onto the latest corrected / OMR score.
+                _under_src = next(
+                    (
+                        f for f in sorted(piece.files, key=lambda x: x.id, reverse=True)
+                        if f.file_type == FileType.XML
+                        and (f.original_filename or "").lower().startswith("corrected_")
+                    ),
+                    None,
+                ) or next(
+                    (
+                        f for f in sorted(piece.files, key=lambda x: x.id, reverse=True)
+                        if f.file_type == FileType.XML
+                        and not (f.description or "").startswith("[REFERENCJA]")
+                        and not (f.original_filename or "").lower().startswith("final_")
+                    ),
+                    None,
+                )
+                _can_underlay = bool((piece.lyrics or "").strip()) and _under_src is not None
+                if st.button(
+                    "🎶 Podłóż tekst do nut (krok 5)",
+                    key=f"underlay_only_{selected_piece_id}",
+                    disabled=not _can_underlay,
+                    help=(
+                        None if _can_underlay
+                        else "Wymagany tekst pieśni oraz partytura MusicXML (uruchom OMR/korektę)."
+                    ),
+                ):
+                    with st.spinner("Algorytmiczny podkład tekstu pod nuty..."):
+                        try:
+                            with get_db_session() as db2:
+                                _r5 = PipelineService().run_step5_underlay(
+                                    db2,
+                                    selected_piece_id,
+                                    piece.lyrics,
+                                    xml_path=_under_src.file_path,
+                                    source_file_id=_under_src.id,
+                                )
+                                db2.commit()
+                            st.session_state["processing_flash"] = {
+                                "piece_id": selected_piece_id,
+                                "message": "✅ " + _r5.get("detail", "Podkład tekstu zakończony."),
+                            }
+                            st.rerun()
+                        except Exception as _exc:
+                            logger.exception("standalone underlay failed")
+                            st.error(f"Błąd podkładu tekstu: {str(_exc)}")
 
                 _btn_transl_lbl = (
                     "🔁 Przetłumacz ponownie"
