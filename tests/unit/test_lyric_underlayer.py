@@ -1,11 +1,12 @@
-"""Unit tests for the step-5 programmatic, per-voice lyric underlay.
+"""Unit tests for the step-5 underlay: algorithmic by default, LLM only on low confidence.
 
-The LLM is mocked (it only returns a per-part syllable plan); the focus is that the code
-inserts <lyric> elements into real MusicXML via music21, re-exports a valid document, and
-keeps the original on any failure.
+The LLM client is always a mock; tests assert WHEN it is (not) called and that lyrics land in
+real MusicXML via music21 with a valid round-trip.
 """
 
 from unittest.mock import MagicMock
+
+import pytest
 
 from src.llm.lyric_underlayer import OnsetSyllable, PartSyllables, underlay_lyrics
 
@@ -29,7 +30,7 @@ THREE_NOTE_XML = """<?xml version="1.0" encoding="UTF-8"?>
 </score-partwise>"""
 
 
-# Two vocal parts (SA + TB style), three notes each — to prove EVERY part gets lyrics.
+# Two vocal parts (SA + TB style), three notes each.
 TWO_PART_XML = """<?xml version="1.0" encoding="UTF-8"?>
 <score-partwise version="3.1">
   <part-list>
@@ -65,74 +66,102 @@ TWO_PART_XML = """<?xml version="1.0" encoding="UTF-8"?>
 </score-partwise>"""
 
 
-def _client(*syllables) -> MagicMock:
-    """Mock client whose every parse() returns a PartSyllables with the given onsets."""
+@pytest.fixture(autouse=True)
+def _clear_backend_env(monkeypatch):
+    """Default to the auto backend regardless of the developer's shell environment."""
+    monkeypatch.delenv("CMO_UNDERLAY_BACKEND", raising=False)
+    monkeypatch.delenv("CMO_UNDERLAY_LLM_THRESHOLD", raising=False)
+
+
+def _llm_client(*syllables) -> MagicMock:
     client = MagicMock()
     client.parse.return_value = PartSyllables(syllables=list(syllables), notes="test")
     return client
 
 
-class TestProgrammaticUnderlay:
-    def test_inserts_lyrics_and_validates(self):
-        client = _client(
-            OnsetSyllable(text="A", syllabic="begin"),
-            OnsetSyllable(text="ve", syllabic="end"),
-            OnsetSyllable(text="Ma", syllabic="single"),
-        )
+def _lyric_count(musicxml: str) -> list:
+    from music21 import converter
+
+    score = converter.parseData(musicxml, format="musicxml")
+    return [sum(1 for n in p.recurse().notes if n.lyrics) for p in score.parts]
+
+
+class TestUnderlay:
+    def test_algorithmic_when_counts_match_no_llm(self):
+        # "Ave Ma" → A-ve + Ma = 3 syllables over 3 notes → confidence 1.0 → no LLM.
+        client = _llm_client()
         result = underlay_lyrics("Ave Ma", THREE_NOTE_XML, client=client)
 
         assert result.changed is True
         assert "<lyric" in result.musicxml
-        assert "ve" in result.musicxml and "Ma" in result.musicxml
-        assert result.validation_error is None
-        # One LLM call per vocal part (one part here).
-        assert client.parse.call_count == 1
+        assert _lyric_count(result.musicxml) == [3]
+        client.parse.assert_not_called()
 
-    def test_melisma_empty_text_is_skipped(self):
-        # Second note is a melisma continuation (empty) — only two syllables placed.
-        client = _client(
+    def test_fills_every_vocal_part_algorithmically(self):
+        client = _llm_client()
+        result = underlay_lyrics("la la la", TWO_PART_XML, client=client)
+
+        assert result.changed is True
+        assert _lyric_count(result.musicxml) == [3, 3]
+        client.parse.assert_not_called()
+
+    def test_more_notes_than_syllables_makes_melisma_algo_only(self, monkeypatch):
+        monkeypatch.setenv("CMO_UNDERLAY_BACKEND", "algo")  # never escalate
+        client = _llm_client()
+        result = underlay_lyrics("A", THREE_NOTE_XML, client=client)
+
+        assert result.changed is True
+        assert "Podłożono 1 sylab" in result.report
+        assert _lyric_count(result.musicxml) == [1]  # one syllable, two melisma notes
+        client.parse.assert_not_called()
+
+    def test_low_confidence_escalates_to_llm(self):
+        # 1 syllable over 3 notes → confidence < 0.6 → LLM redoes the part.
+        client = _llm_client(
             OnsetSyllable(text="A", syllabic="begin"),
             OnsetSyllable(text="", syllabic="single"),
             OnsetSyllable(text="men", syllabic="end"),
         )
-        result = underlay_lyrics("Amen", THREE_NOTE_XML, client=client)
+        result = underlay_lyrics("A", THREE_NOTE_XML, client=client)
 
         assert result.changed is True
-        assert "Podłożono 2 sylab" in result.report
+        client.parse.assert_called_once()
+        assert _lyric_count(result.musicxml) == [2]  # from the LLM plan
 
-    def test_no_syllables_keeps_original(self):
-        client = _client(OnsetSyllable(text="", syllabic="single"))
-        result = underlay_lyrics("x", THREE_NOTE_XML, client=client)
-
-        assert result.changed is False
-        assert result.musicxml == THREE_NOTE_XML
-        assert result.validation_error
-
-    def test_fills_every_vocal_part(self):
-        # The mock returns plenty of syllables for each part; both parts must get lyrics
-        # (regression: the old single-call design left all but the first part empty).
-        client = _client(
+    def test_forced_llm_backend_always_calls(self, monkeypatch):
+        monkeypatch.setenv("CMO_UNDERLAY_BACKEND", "llm")
+        client = _llm_client(
             OnsetSyllable(text="la", syllabic="single"),
             OnsetSyllable(text="la", syllabic="single"),
             OnsetSyllable(text="la", syllabic="single"),
         )
-        result = underlay_lyrics("la la la", TWO_PART_XML, client=client)
+        result = underlay_lyrics("la la la", THREE_NOTE_XML, client=client)
 
         assert result.changed is True
-        assert client.parse.call_count == 2  # one alignment call per vocal part
+        client.parse.assert_called_once()
 
-        from music21 import converter
+    def test_llm_failure_falls_back_to_algorithm(self):
+        # Non-transient error → no retry → immediate fallback to the algorithmic placement.
+        client = MagicMock()
+        client.parse.side_effect = RuntimeError("claude CLI zwrócił kod 1: brak dostępu")
+        result = underlay_lyrics("A", THREE_NOTE_XML, client=client)  # low conf → tries LLM
 
-        score = converter.parseData(result.musicxml, format="musicxml")
-        per_part = [
-            sum(1 for n in p.recurse().notes if n.lyrics) for p in score.parts
-        ]
-        assert per_part == [3, 3]  # BOTH parts fully texted
+        assert result.changed is True  # fell back to the algorithmic placement
+        client.parse.assert_called_once()
+        assert _lyric_count(result.musicxml) == [1]
+
+    def test_no_syllables_keeps_original(self):
+        client = MagicMock()
+        result = underlay_lyrics("--- 123 !!!", THREE_NOTE_XML, client=client)
+
+        assert result.changed is False
+        assert result.musicxml == THREE_NOTE_XML
+        client.parse.assert_not_called()
 
     def test_unparseable_input_keeps_original(self):
         client = MagicMock()
-        result = underlay_lyrics("x", "<not-music-xml>", client=client)
+        result = underlay_lyrics("la", "<not-music-xml>", client=client)
 
         assert result.changed is False
         assert result.musicxml == "<not-music-xml>"
-        client.parse.assert_not_called()  # never reached the LLM
+        client.parse.assert_not_called()

@@ -1,24 +1,26 @@
 """Step 5 — place the cleaned lyrics under the notes, then validate the whole file.
 
-Unlike steps 2/4, this step does **not** ask the LLM to rewrite the MusicXML. OMR scores
-are large and regenerating the whole document to add a text layer reliably overran the
-model's output budget. Instead the work is split: the **LLM aligns syllables to notes**
-(small, bounded structured output) and the **code inserts** them as ``<lyric>`` via music21.
+Algorithm first, LLM only on the hard cases
+-------------------------------------------
+Underlay is mostly mechanical, so it is done **in pure Python** by
+:mod:`src.services.lyric_alignment`: the text is syllabified and distributed over each voice's
+notes using the melodic structure (slurs/ties mark melismas, rests mark phrase ends). This
+needs no LLM — so the common, syllabic SATB case costs nothing and never times out.
 
-Per-voice alignment
--------------------
-Choral music carries the same text in every voice (homophonic) or each voice sings the whole
-text (polyphonic). A single LLM call asked to fill *all* parts at once was unreliable — it
-typically returned syllables for the first part only, leaving the other voices empty. So we
-align **one part at a time**: each call sees the song text plus that part's note sequence and
-returns one entry per note. This guarantees every vocal part gets its lyrics, and keeps each
-request small. Transient API errors (503/overload) on a single part are retried and, if they
-still fail, that part is skipped rather than crashing the whole step.
+Each part's algorithmic alignment carries a **confidence**. Only when a part scores below a
+threshold (e.g. heavy melismas the score didn't mark, or a syllable/note mismatch) do we spend
+an **LLM call to redo just that part** (bounded per-onset structured output, inserted by
+music21). The backend is selectable via ``CMO_UNDERLAY_BACKEND`` (``auto`` | ``algo`` | ``llm``)
+and the escalation threshold via ``CMO_UNDERLAY_LLM_THRESHOLD`` (default 0.6).
 
-The result is round-tripped through music21; on a hard failure the step-4 document is kept.
+This replaces the previous "one LLM call per voice always" design, which was slow and reliably
+timed out on real scores. Transient LLM failures fall back to the algorithmic result for that
+part instead of crashing. The result is round-tripped through music21; on a hard failure the
+step-4 document is kept.
 """
 
 import logging
+import os
 import shutil
 import tempfile
 import time
@@ -28,6 +30,7 @@ from typing import Any, List, Optional
 
 from src.llm.client import LLMClient, make_client
 from src.llm.musicxml_validate import validate_musicxml
+from src.services.lyric_alignment import align_part, extract_phrases, syllabify_text
 
 try:  # pydantic ships with google-genai; degrade gracefully when neither is installed
     from pydantic import BaseModel, Field
@@ -182,6 +185,24 @@ def _apply_syllables(onsets: list, syllables: List) -> int:
     return placed
 
 
+def _apply_assignment(assignments: list) -> int:
+    """Insert an algorithmic ``(note, text, syllabic)`` assignment as music21 lyrics."""
+    from music21 import note as m21note
+
+    placed = 0
+    for note_el, text, syllabic in assignments:
+        clean = (text or "").strip()
+        if not clean:
+            continue  # melisma continuation / untexted note
+        lyric = m21note.Lyric(text=clean, number=1)
+        syl = (syllabic or "single").strip().lower()
+        if syl in _SYLLABIC:
+            lyric.syllabic = syl
+        note_el.lyrics.append(lyric)
+        placed += 1
+    return placed
+
+
 def _export(score) -> str:
     """Eksportuj kompletny ``Score`` do tekstu MusicXML przez standardowy writer music21.
 
@@ -203,6 +224,14 @@ def _keep(musicxml: str, report: str, error: str) -> UnderlayResult:
     return UnderlayResult(musicxml=musicxml, report=report, changed=False, validation_error=error)
 
 
+def _underlay_threshold() -> float:
+    """Confidence below which a part is escalated to the LLM (env-tunable)."""
+    try:
+        return float(os.getenv("CMO_UNDERLAY_LLM_THRESHOLD", "0.6"))
+    except ValueError:
+        return 0.6
+
+
 def underlay_lyrics(
     lyrics: str,
     musicxml: str,
@@ -210,19 +239,23 @@ def underlay_lyrics(
 ) -> UnderlayResult:
     """Underlay ``lyrics`` into every vocal part of ``musicxml`` and validate the result.
 
-    The LLM produces a syllable-per-onset alignment **per part**; this function inserts the
-    ``<lyric>`` elements with music21 and re-exports, so output size is bounded by the score.
+    Algorithmic by default (no LLM): :mod:`src.services.lyric_alignment` syllabifies the text
+    and distributes it over each voice using slurs/ties/rests. Each part's alignment carries a
+    confidence; only parts scoring below :func:`_underlay_threshold` are redone by the LLM
+    (``CMO_UNDERLAY_BACKEND`` = ``auto`` default | ``algo`` never | ``llm`` always). A failed
+    LLM call falls back to the algorithmic result for that part.
 
     Args:
         lyrics: Cleaned lyrics from step 2.
         musicxml: Corrected MusicXML from step 4.
-        client: Optional injected client (tests pass a mock).
+        client: Optional injected LLM client (tests pass a mock); created lazily only if needed.
 
     Returns:
         An :class:`UnderlayResult`; ``changed`` is False when no syllable could be placed
         or the result failed validation (the step-4 document is returned unchanged).
     """
-    client = client or make_client()
+    backend = (os.getenv("CMO_UNDERLAY_BACKEND") or "auto").strip().lower()
+    threshold = _underlay_threshold()
 
     try:
         score = _load_score(musicxml)
@@ -235,10 +268,18 @@ def underlay_lyrics(
             str(exc),
         )
 
+    syllables = syllabify_text(lyrics)
+    if not syllables:
+        return _keep(
+            musicxml,
+            "⚠️ Z tekstu nie udało się wyodrębnić sylab — zachowano plik z korekty.",
+            "Brak sylab w tekście.",
+        )
+
     vocal_parts = [
-        (idx, part, onsets)
+        (idx, part)
         for idx, part in enumerate(score.parts)
-        if not _is_instrumental(part) and (onsets := _part_onsets(part))
+        if not _is_instrumental(part) and _part_onsets(part)
     ]
     if not vocal_parts:
         return _keep(
@@ -247,28 +288,61 @@ def underlay_lyrics(
             "Brak głosów wokalnych z nutami.",
         )
 
+    # Lazily-created LLM client, shared across parts; only built when a part needs it.
+    llm: dict = {"client": client, "tried": client is not None}
+
+    def _get_client():
+        if not llm["tried"]:
+            llm["tried"] = True
+            try:
+                llm["client"] = make_client()
+            except Exception as exc:  # no backend available → stay algorithmic
+                logger.info("underlay_lyrics: brak backendu LLM (%s) — tylko algorytm", exc)
+                llm["client"] = None
+        return llm["client"]
+
     total_placed = 0
     parts_with_text = 0
     per_part: List[str] = []
-    failures: List[int] = []
-    for idx, _part, onsets in vocal_parts:
-        try:
-            syllables = _align_part(client, lyrics, onsets, idx)
-        except Exception as exc:  # noqa: BLE001 - one failed part must not sink the rest
-            logger.warning("underlay_lyrics: partia %s nieudana: %s", idx, exc)
-            failures.append(idx)
-            continue
-        placed = _apply_syllables(onsets, syllables)
+    for idx, part in vocal_parts:
+        phrases = extract_phrases(part)
+        algo = align_part(syllables, phrases)
+        onsets = _part_onsets(part)
+
+        want_llm = backend == "llm" or (backend == "auto" and algo.confidence < threshold)
+        method = "algorytm"
+        placed = 0
+        if want_llm and backend != "algo":
+            c = _get_client()
+            if c is not None:
+                try:
+                    plan = _align_part(c, lyrics, onsets, idx)
+                    placed = _apply_syllables(onsets, plan)
+                    method = "LLM"
+                except Exception as exc:  # noqa: BLE001 - fall back, don't sink the part
+                    logger.warning(
+                        "underlay_lyrics: LLM dla partii %s nieudany (%s) — używam algorytmu",
+                        idx, exc,
+                    )
+                    placed = _apply_assignment(algo.note_assignments)
+                    method = "algorytm (LLM nieudany)"
+            else:
+                placed = _apply_assignment(algo.note_assignments)
+        else:
+            placed = _apply_assignment(algo.note_assignments)
+
         total_placed += placed
         if placed:
             parts_with_text += 1
-        per_part.append(f"głos {idx}: {placed}/{len(onsets)}")
+        per_part.append(
+            f"głos {idx}: {placed}/{algo.slot_count} [{method}, pewność={algo.confidence}]"
+        )
 
     if total_placed == 0:
         return _keep(
             musicxml,
-            "⚠️ Nie podłożono żadnej sylaby (możliwe błędy API) — zachowano plik z korekty.",
-            "Plan podkładu nie umieścił żadnej sylaby.",
+            "⚠️ Nie podłożono żadnej sylaby — zachowano plik z korekty.",
+            "Algorytm/LLM nie umieścił żadnej sylaby.",
         )
 
     try:
@@ -291,9 +365,7 @@ def underlay_lyrics(
         )
 
     report = (
-        f"Podłożono {total_placed} sylab w {parts_with_text} głosach (per-głos, music21). "
+        f"Podłożono {total_placed} sylab w {parts_with_text} głosach. "
         f"Szczegóły: {', '.join(per_part)}."
     )
-    if failures:
-        report += f" Pominięte głosy (błąd API): {failures}."
     return UnderlayResult(musicxml=out_xml, report=report, changed=True, score=score)
