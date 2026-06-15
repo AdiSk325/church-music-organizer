@@ -93,15 +93,24 @@ Architektura (iteracyjnie):
   (number=2) obok oryginału — chór widzi oba.
 - v2: dopasowanie akcentów do metrum (wykorzystać analizę metryczną z `score_analyzer`).
 - v3: warianty (dosłowny / śpiewalny / rymowany) do wyboru; pętla korekty z człowiekiem.
-- Reużycie: onsety/melizmaty z kroku 5, detekcja języka z kroku 2, walidacja music21.
+- **Reużycie gotowego fundamentu:** `src/services/lyric_alignment.py` (powstało przy podkładzie,
+  sekcja 3.3) już liczy frazy, sloty sylab i melizmaty per głos oraz dzieli tekst na sylaby
+  wielojęzycznie — to dokładnie ograniczenia, których potrzebuje tłumaczenie śpiewalne. Plus
+  detekcja języka z kroku 2 i walidacja music21.
 
 ### 3.2. Korekta z człowiekiem w pętli + mapa pewności
 Pozycjonujemy OMR/LLM jako **draft + asystenta oznaczającego niepewność**, nie jako automat.
 (Szczegóły i lekcje z PhotoScore — sekcja 4.)
 
-### 3.3. Wielogłosowy podkład tekstu (SATB) — JEST
-Krok 5 podkłada tekst per głos. Do dopracowania: jakość dopasowania na realnym repertuarze,
-melizmaty, powtórzenia strof, divisi.
+### 3.3. Wielogłosowy podkład tekstu (SATB) — JEST, teraz ALGORYTMICZNY
+Krok 5 podkłada tekst per głos **algorytmicznie** (`src/services/lyric_alignment.py`): dzieli
+tekst na sylaby, czyta strukturę melodyczną (łuki/ligatury = melizmaty, pauzy = granice fraz) i
+rozkłada sylaby na nuty bez LLM. LLM wchodzi **tylko** dla głosów o niskiej pewności
+(`CMO_UNDERLAY_BACKEND=auto`, próg `CMO_UNDERLAY_LLM_THRESHOLD`). Efekt: typowy sylabiczny SATB
+kosztuje 0 wywołań LLM i nie timeoutuje (dowód: realny SATB — 107 sylab w 0,25 s). To rozwiązuje
+zgłaszany `TimeoutExpired` z kroku 5 i czyni go *tani w skali* (kluczowe biznesowo).
+Do dopracowania: jakość na repertuarze melizmatycznym, powtórzenia strof, divisi, lepsza
+heurystyka rozmieszczenia melizmatów bez łuków.
 
 ### 3.4. Analiza pod chór — do pogłębienia
 Rozszerzyć `score_analyzer`/`score_descriptor`: zakresy i tessitura per głos, ocena trudności
@@ -238,8 +247,9 @@ Jako generyczny OMR — nie. Łączymy rzeczy, których nikt nie łączy.
 ---
 
 ## Załącznik: stan techniczny (skrót)
-- Pipeline: OCR → (metadane) → czyszczenie tekstu → OMR → korekta → podkład tekstu.
+- Pipeline: OCR → (metadane) → czyszczenie tekstu → OMR → korekta → podkład tekstu
+  (algorytmiczny, LLM tylko przy niskiej pewności — `src/services/lyric_alignment.py`).
 - OMR: Audiveris (`D:\Audiveris\Audiveris.exe`). LLM: Gemini główny + `claude` CLI fallback.
 - Output kanoniczny: walidowany, otwieralny `.musicxml` (+ `.mxl`); `.mscz` jako add-on.
-- Testy: 236 zielonych (2026-06-15). Eval: `data/processed/eval/REPORT.md`.
+- Testy: 249 zielonych (2026-06-15). Eval: `data/processed/eval/REPORT.md`.
 - Notatki stanu: `llm-pipeline-state`, `omr-engine-state`, `product-roadmap`.
