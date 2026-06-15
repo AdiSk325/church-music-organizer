@@ -295,6 +295,62 @@ def compute_correct_score_metrics(
     }
 
 
+def compute_musicxml_structure(musicxml_text: Optional[str]) -> dict:
+    """Reference-free structural metrics for a produced MusicXML/MXL document.
+
+    No ground-truth reference is needed — this measures the artefact on its own terms
+    (does it pass MuseScore-safe validation, how many notes / measures / parts it holds).
+    Combined across stages it lets us compare raw OMR output vs the post-LLM result.
+
+    Heavy imports (music21, the validator) are lazy so importing this module stays cheap.
+
+    Returns
+    -------
+    dict with keys: ``valid`` (bool), ``reason`` (str|None), ``note_count`` (int),
+    ``measure_count`` (int, max measures across parts), ``part_count`` (int).
+    """
+    empty = {
+        "valid": False,
+        "reason": "Brak dokumentu." if not musicxml_text else None,
+        "note_count": 0,
+        "measure_count": 0,
+        "part_count": 0,
+    }
+    if not musicxml_text:
+        return empty
+
+    from src.llm.musicxml_validate import validate_musicxml
+
+    ok, reason, score = validate_musicxml(musicxml_text)
+    if not ok or score is None:
+        empty["reason"] = reason
+        return empty
+
+    try:
+        note_count = len(list(score.recurse().notes))
+        parts = list(score.parts)
+        measure_count = max(
+            (len(list(p.getElementsByClass("Measure"))) for p in parts), default=0
+        )
+        part_count = len(parts)
+    except Exception as exc:  # pragma: no cover - defensive
+        return {
+            "valid": False,
+            "reason": f"Nie udało się policzyć struktury: {exc}",
+            "note_count": 0,
+            "measure_count": 0,
+            "part_count": 0,
+        }
+
+    return {
+        "valid": True,
+        "reason": None,
+        "note_count": note_count,
+        "measure_count": measure_count,
+        "part_count": part_count,
+    }
+
+
 def compute_underlay_metrics(
     output_file_id: Optional[int],
     report: Optional[str],

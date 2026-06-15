@@ -9,7 +9,7 @@ if it does not parse, the original is kept and the failure is recorded in the re
 
 import logging
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
 from src.llm.client import LLMClient, extract_musicxml
 from src.llm.musicxml_validate import validate_musicxml
@@ -23,6 +23,7 @@ class ScoreCorrectionResult:
     report: str  # human-readable summary of changes / issues
     changed: bool  # True when a valid corrected document replaced the original
     validation_error: Optional[str] = None  # set when the LLM output failed validation
+    score: Optional[Any] = None  # parsed music21 Score, available when changed=True
 
 
 _SYSTEM = """\
@@ -99,7 +100,7 @@ def correct_score(
             validation_error="Brak dokumentu MusicXML w odpowiedzi.",
         )
 
-    ok, error = validate_musicxml(candidate)
+    ok, error, score = validate_musicxml(candidate)
     if not ok:
         logger.warning("correct_score: walidacja music21 odrzuciła wynik: %s", error)
         return ScoreCorrectionResult(
@@ -110,4 +111,4 @@ def correct_score(
             validation_error=error,
         )
 
-    return ScoreCorrectionResult(musicxml=candidate, report=report, changed=True)
+    return ScoreCorrectionResult(musicxml=candidate, report=report, changed=True, score=score)

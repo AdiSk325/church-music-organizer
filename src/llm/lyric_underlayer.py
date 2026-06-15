@@ -17,8 +17,11 @@ document is kept unchanged.
 """
 
 import logging
+import shutil
+import tempfile
 from dataclasses import dataclass
-from typing import List, Optional
+from pathlib import Path
+from typing import Any, List, Optional
 
 from src.llm.client import LLMClient
 from src.llm.musicxml_validate import validate_musicxml
@@ -47,6 +50,7 @@ class UnderlayResult:
     report: str  # validation / placement summary
     changed: bool  # True when a valid underlaid document was produced
     validation_error: Optional[str] = None
+    score: Optional[Any] = None  # music21 Score with lyrics applied, available when changed=True
 
 
 class OnsetSyllable(BaseModel):
@@ -147,9 +151,20 @@ def _apply_plan(parts_onsets: List[list], plan: UnderlayPlan) -> int:
 
 
 def _export(score) -> str:
-    from music21.musicxml.m21ToXml import GeneralObjectExporter
+    """Eksportuj kompletny ``Score`` do tekstu MusicXML przez standardowy writer music21.
 
-    return GeneralObjectExporter(score).parse().decode("utf-8")
+    Świadomie NIE używamy ``GeneralObjectExporter`` — traktował on obiekt jak „fragment"
+    (stąd ``<movement-title>Music21 Fragment</movement-title>`` i gubienie struktury
+    part-list). ``score.write('musicxml')`` daje kompletny, otwieralny dokument.
+    """
+    tmpdir = tempfile.mkdtemp(prefix="cmo_xml_")
+    out_path = Path(tmpdir) / "score.musicxml"
+    try:
+        written = score.write("musicxml", fp=str(out_path))
+        result_path = Path(written) if written else out_path
+        return result_path.read_text(encoding="utf-8")
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 def underlay_lyrics(
@@ -219,7 +234,7 @@ def underlay_lyrics(
             validation_error=str(exc),
         )
 
-    ok, error = validate_musicxml(out_xml)
+    ok, error, _validated = validate_musicxml(out_xml)
     if not ok:
         logger.warning("underlay_lyrics: walidacja music21 odrzuciła wynik: %s", error)
         return UnderlayResult(
@@ -231,4 +246,4 @@ def underlay_lyrics(
         )
 
     report += f"\n\nPodłożono {placed} sylab w {len(plan.parts)} partii (programowo, music21)."
-    return UnderlayResult(musicxml=out_xml, report=report, changed=True)
+    return UnderlayResult(musicxml=out_xml, report=report, changed=True, score=score)

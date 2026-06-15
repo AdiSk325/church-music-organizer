@@ -24,6 +24,7 @@ from src.evaluation.metrics import (
     compute_analysis_metrics,
     compute_clean_text_metrics,
     compute_correct_score_metrics,
+    compute_musicxml_structure,
     compute_ocr_metrics,
     compute_omr_metrics,
     compute_underlay_metrics,
@@ -129,6 +130,12 @@ def evaluate_piece(db: Session, piece_id: int) -> PipelineQualityReport:
         else:
             metrics = {}
 
+        # Enrich file-producing stages with reference-free structural metrics of the
+        # actual output document (validity, .mxl format, note/measure/part counts) so
+        # raw OMR can be compared against the post-LLM result.
+        if key in ("omr", "correct_score", "underlay"):
+            metrics.update(_output_structure(db, step))
+
         # ----------------------------------------------------------------
         # Derive quality status from metrics + thresholds
         # ----------------------------------------------------------------
@@ -209,6 +216,45 @@ def report_to_table_rows(report: PipelineQualityReport) -> List[tuple]:
         glyph = _STATUS_GLYPH.get(s.status, s.status).strip()
         rows.append((s.key, s.label, glyph, s.duration_ms, s.notes))
     return rows
+
+
+# ---------------------------------------------------------------------------
+# Output-file structure loader (reference-free)
+# ---------------------------------------------------------------------------
+
+
+def _output_structure(db: Session, step: Optional[ProcessingStep]) -> dict:
+    """Load a stage's produced MusicFile and return reference-free structure metrics.
+
+    Returns an empty dict when there is no output file or it cannot be read; otherwise
+    a dict with ``valid``, ``reason``, ``note_count``, ``measure_count``, ``part_count``
+    plus ``is_mxl`` (True when the artefact is a compressed ``.mxl``).
+    """
+    if step is None or not step.output_file_id:
+        return {}
+    mf: Optional[MusicFile] = (
+        db.query(MusicFile).filter(MusicFile.id == step.output_file_id).first()
+    )
+    if mf is None or not mf.file_path:
+        return {}
+
+    from pathlib import Path
+
+    p = Path(mf.file_path)
+    if not p.exists():
+        return {}
+
+    try:
+        from src.llm.musicxml_validate import load_musicxml_text
+
+        text = load_musicxml_text(str(p))
+    except Exception as exc:
+        logger.warning("evaluate: nie udało się wczytać pliku wyjściowego %s: %s", p, exc)
+        return {}
+
+    structure = compute_musicxml_structure(text)
+    structure["is_mxl"] = p.suffix.lower() == ".mxl"
+    return structure
 
 
 # ---------------------------------------------------------------------------

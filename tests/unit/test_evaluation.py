@@ -12,7 +12,43 @@ from sqlalchemy.orm import sessionmaker
 
 from src.database.models import Base, FileType, MusicFile, MusicPiece, ProcessingStep
 from src.evaluation.evaluator import evaluate_piece, report_to_markdown
-from src.evaluation.metrics import _alpha_ratio, _analysis_completeness, _parse_syllables_placed
+from src.evaluation.metrics import (
+    _alpha_ratio,
+    _analysis_completeness,
+    _parse_syllables_placed,
+    compute_musicxml_structure,
+)
+
+_VALID_MXL_TEXT = """<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <part-list><score-part id="P1"><part-name>M</part-name></score-part></part-list>
+  <part id="P1"><measure number="1">
+    <attributes><divisions>1</divisions>
+      <time><beats>4</beats><beat-type>4</beat-type></time>
+      <clef><sign>G</sign><line>2</line></clef></attributes>
+    <note><pitch><step>C</step><octave>4</octave></pitch>
+      <duration>4</duration><type>whole</type></note>
+  </measure></part>
+</score-partwise>"""
+
+
+class TestComputeMusicXMLStructure:
+    def test_empty_text_is_invalid(self):
+        m = compute_musicxml_structure(None)
+        assert m["valid"] is False
+        assert m["note_count"] == 0 and m["part_count"] == 0
+
+    def test_garbage_is_invalid_with_reason(self):
+        m = compute_musicxml_structure("<score-partwise><oops></broken")
+        assert m["valid"] is False
+        assert m["reason"]
+
+    def test_valid_document_counts_structure(self):
+        m = compute_musicxml_structure(_VALID_MXL_TEXT)
+        assert m["valid"] is True
+        assert m["note_count"] == 1
+        assert m["part_count"] == 1
+        assert m["measure_count"] == 1
 
 
 @pytest.fixture
