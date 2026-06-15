@@ -4,6 +4,7 @@ import base64
 import logging
 import os
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -22,6 +23,8 @@ from src.services import (
     PipelineService,
     ProcessingStepService,
 )
+from src.evaluation.reference_compare import compare_musicxml
+from src.llm.translator import translate_to_polish
 from src.services.pipeline_service import STEP_LABELS, STEP_SEQUENCE
 
 logger = logging.getLogger(__name__)
@@ -166,6 +169,27 @@ def _fmt_duration(ms) -> str:
     return f"{seconds:.1f}s" if seconds >= 0.1 else f"{ms} ms"
 
 
+# Static fallback durations (seconds) for ETA when no run history exists per step key.
+_ETA_FALLBACK_S = {
+    "ocr": 5,
+    "clean_text": 8,
+    "omr": 90,
+    "correct_score": 20,
+    "underlay": 15,
+}
+_PIPELINE_STEP_KEYS = ["ocr", "clean_text", "omr", "correct_score", "underlay"]
+# Reverse mapping: step label → step key (used inside the ETA progress callback).
+_LABEL_TO_KEY = {v: k for k, v in STEP_LABELS.items() if k in _PIPELINE_STEP_KEYS}
+
+
+def _fmt_elapsed(seconds: float) -> str:
+    """Format a duration (seconds) as 'm:ss' or 'Xs' for inline progress display."""
+    s = max(0, int(seconds))
+    if s >= 60:
+        return f"{s // 60}m {s % 60:02d}s"
+    return f"{s}s"
+
+
 def render_processing_panel(latest_steps: dict) -> None:
     """Render the persistent pipeline-status panel from the newest step per key."""
     if not latest_steps:
@@ -240,6 +264,9 @@ if "selected_piece_id" not in st.session_state:
 
 if "page" not in st.session_state:
     st.session_state.page = 0
+
+if "translation_notes" not in st.session_state:
+    st.session_state.translation_notes = None
 
 # ---------------------------------------------------------------------------
 # Sidebar navigation
@@ -581,34 +608,34 @@ elif page == "Song Details":
                 latest_steps = ProcessingStepService.latest_by_key(db, selected_piece_id)
 
                 # --- DESCRIPTION & METADATA ---
-                st.subheader("📝 Description & Metadata")
+                st.subheader("📝 Opis i metadane")
                 col1, col2 = st.columns(2)
 
                 with col1:
-                    st.write(f"**Title:** {piece.title}")
-                    st.write(f"**Lyrics Author:** {piece.lyrics_author or '—'}")
-                    st.write(f"**Music Author:** {piece.music_author or '—'}")
-                    st.write(f"**Harmony Author:** {piece.harmony_author or '—'}")
+                    st.write(f"**Tytuł:** {piece.title}")
+                    st.write(f"**Autor słów:** {piece.lyrics_author or '—'}")
+                    st.write(f"**Autor muzyki:** {piece.music_author or '—'}")
+                    st.write(f"**Autor harmonii:** {piece.harmony_author or '—'}")
                     if piece.composer:
-                        st.write(f"**Composer:** {piece.composer}")
+                        st.write(f"**Kompozytor:** {piece.composer}")
                     if piece.arranger:
-                        st.write(f"**Arranger:** {piece.arranger}")
+                        st.write(f"**Aranżer:** {piece.arranger}")
 
                 with col2:
-                    st.write(f"**Key Signature:** {piece.key_signature or '—'}")
-                    st.write(f"**Time Signature:** {piece.time_signature or '—'}")
-                    st.write(f"**Measures:** {piece.measures_count or '—'}")
+                    st.write(f"**Tonacja:** {piece.key_signature or '—'}")
+                    st.write(f"**Metrum:** {piece.time_signature or '—'}")
+                    st.write(f"**Liczba taktów:** {piece.measures_count or '—'}")
                     if piece.tempo:
                         st.write(f"**Tempo:** {piece.tempo}")
                     if piece.genre:
-                        st.write(f"**Genre:** {piece.genre}")
+                        st.write(f"**Gatunek:** {piece.genre}")
                     if piece.language:
-                        st.write(f"**Language:** {piece.language}")
+                        st.write(f"**Język:** {piece.language}")
 
                 if piece.description:
-                    st.markdown(f"**Description:** {piece.description}")
+                    st.markdown(f"**Opis:** {piece.description}")
                 if piece.notes:
-                    st.markdown(f"**Notes:** {piece.notes}")
+                    st.markdown(f"**Notatki:** {piece.notes}")
 
                 # Full automatic score analysis (persisted from the OMR analysis step).
                 _analysis_step = latest_steps.get("analysis")
@@ -709,6 +736,13 @@ elif page == "Song Details":
                             "GEMINI_API_KEY w pliku .env"
                         )
 
+                st.info(
+                    "**Jak przetworzyć ten utwór:**  \n"
+                    "1. Wgraj plik PDF lub skan w sekcji **Upload** (na dole strony).  \n"
+                    "2. Kliknij **🤖 Pełny pipeline (1→5)** — OCR wyciągnie tekst, OMR "
+                    "skonwertuje nuty na MusicXML, LLM oczyści i podłoży tekst.  \n"
+                    "3. Pobierz gotowy plik MusicXML lub sprawdź wyniki w panelu statusu."
+                )
                 processable_files = pdf_files + scan_files
                 if processable_files:
                     st.write("**Pliki do przetworzenia (PDF / skan):**")
@@ -725,17 +759,51 @@ elif page == "Song Details":
                             "(LLM) → podkład tekstu (LLM). Kroki bez dostępnego silnika są "
                             "pomijane.",
                         ):
-                            # Live progress bar driven by run_full's on_progress callback.
+                            # Pobierz historyczne średnie czasy kroków do wyznaczenia ETA.
+                            _hist_avgs: dict = {}
+                            for _sk in _PIPELINE_STEP_KEYS:
+                                _skh = ProcessingStepService.history(
+                                    db, selected_piece_id, _sk
+                                )
+                                _durs = [
+                                    s.duration_ms for s in _skh
+                                    if s.duration_ms is not None and s.duration_ms > 0
+                                ]
+                                if _durs:
+                                    _hist_avgs[_sk] = sum(_durs) / len(_durs) / 1000
+                            _estimates: dict = {
+                                _sk: _hist_avgs.get(_sk, _ETA_FALLBACK_S.get(_sk, 10))
+                                for _sk in _PIPELINE_STEP_KEYS
+                            }
+                            # Pasek postępu z pomiarem upłyniętego czasu i ETA.
                             _total = 5  # ocr, clean_text, omr, correct_score, underlay
                             _prog = st.progress(0.0, text="Uruchamiam pipeline…")
-                            _counter = {"n": 0}
+                            _state = {"n": 0, "remaining": list(_PIPELINE_STEP_KEYS)}
+                            _t_start = time.perf_counter()
 
-                            def _on_progress(name, status, _p=_prog, _c=_counter, _t=_total):
-                                _c["n"] += 1
+                            def _on_progress(
+                                name,
+                                status,
+                                _p=_prog,
+                                _s=_state,
+                                _t=_total,
+                                _start=_t_start,
+                                _est=_estimates,
+                            ):
+                                _s["n"] += 1
                                 _ico = _STATUS_ICON.get(status, "•")
+                                _el = time.perf_counter() - _start
+                                _key = _LABEL_TO_KEY.get(name)
+                                if _key and _key in _s["remaining"]:
+                                    _s["remaining"].remove(_key)
+                                _eta = sum(_est.get(k, 10) for k in _s["remaining"])
                                 _p.progress(
-                                    min(_c["n"] / _t, 1.0),
-                                    text=f"{_ico} {name} — {status}",
+                                    min(_s["n"] / _t, 1.0),
+                                    text=(
+                                        f"{_ico} {name} — {status} | "
+                                        f"upłynęło: {_fmt_elapsed(_el)}, "
+                                        f"ETA: ~{_fmt_elapsed(_eta)}"
+                                    ),
                                 )
 
                             try:
@@ -947,18 +1015,326 @@ elif page == "Song Details":
                 st.markdown("---")
 
                 # --- LYRICS ---
-                st.subheader("📜 Lyrics")
-                if piece.lyrics:
-                    st.text(piece.lyrics)
-                else:
-                    st.info("No lyrics available for this piece.")
-
-                # Persisted text-cleaning report (step 2), if the LLM ran.
+                st.subheader("📜 Tekst pieśni")
                 _clean_step = latest_steps.get("clean_text")
+                _detected_lang = (
+                    (ProcessingStepService.data(_clean_step) or {}).get("language")
+                    or piece.language
+                )
+                # Uwagi tłumacza z poprzedniego uruchomienia (zapisane przez flash).
+                _transl_notes = st.session_state.pop("translation_notes", None)
+                if _transl_notes:
+                    st.caption(f"Uwagi tłumacza: {_transl_notes}")
+
+                _col_orig, _col_transl = st.columns(2)
+                with _col_orig:
+                    st.markdown("**Tekst oryginalny**")
+                    if piece.lyrics:
+                        st.text_area(
+                            "tekst_orig",
+                            value=piece.lyrics,
+                            height=220,
+                            disabled=True,
+                            label_visibility="collapsed",
+                            key=f"orig_{selected_piece_id}",
+                        )
+                    else:
+                        st.info("Brak tekstu dla tego utworu.")
+
+                with _col_transl:
+                    st.markdown("**Tłumaczenie (PL)**")
+                    if piece.lyrics_translation_pl:
+                        st.text_area(
+                            "tekst_transl",
+                            value=piece.lyrics_translation_pl,
+                            height=220,
+                            disabled=True,
+                            label_visibility="collapsed",
+                            key=f"transl_{selected_piece_id}",
+                        )
+                    else:
+                        st.info("Brak tłumaczenia — kliknij przycisk poniżej.")
+
+                _btn_transl_lbl = (
+                    "🔁 Przetłumacz ponownie"
+                    if piece.lyrics_translation_pl
+                    else "🌐 Przetłumacz na polski (Gemini)"
+                )
+                _can_translate = bool(piece.lyrics) and _llm_avail
+                if st.button(
+                    _btn_transl_lbl,
+                    key=f"translate_{selected_piece_id}",
+                    disabled=not _can_translate,
+                    help=(
+                        None
+                        if _can_translate
+                        else "Wymagany tekst pieśni i dostępny Gemini LLM."
+                    ),
+                ):
+                    with st.spinner("Tłumaczenie przez Gemini…"):
+                        try:
+                            _tr = translate_to_polish(
+                                piece.lyrics, source_language=_detected_lang
+                            )
+                            with get_db_session() as db2:
+                                _p2 = (
+                                    db2.query(MusicPiece)
+                                    .filter_by(id=selected_piece_id)
+                                    .first()
+                                )
+                                if _p2:
+                                    _p2.lyrics_translation_pl = _tr.translation_pl
+                                    db2.commit()
+                            if _tr.notes:
+                                st.session_state["translation_notes"] = _tr.notes
+                            st.session_state["processing_flash"] = {
+                                "piece_id": selected_piece_id,
+                                "message": "✅ Tłumaczenie zapisane.",
+                            }
+                            st.rerun()
+                        except Exception as _exc:
+                            logger.exception("translate_to_polish failed")
+                            st.error(f"Błąd tłumaczenia: {str(_exc)}")
+
                 if _clean_step and _clean_step.report:
                     with st.expander("🧹 Raport czyszczenia tekstu (LLM)"):
-                        st.caption(f"Status: {_clean_step.status} · {_clean_step.detail or ''}")
+                        st.caption(
+                            f"Status: {_clean_step.status} · {_clean_step.detail or ''}"
+                        )
                         st.markdown(_clean_step.report)
+
+                st.markdown("---")
+
+                # --- PORÓWNANIE Z REFERENCJĄ ---
+                st.subheader("📊 Porównanie z referencją (metryki)")
+                _xml_all_sorted = sorted(
+                    [f for f in piece.files if f.file_type == FileType.XML],
+                    key=lambda f: f.id,
+                )
+                _ref_files_cmp = [
+                    f for f in _xml_all_sorted
+                    if (f.description or "").startswith("[REFERENCJA]")
+                ]
+                _cand_files_cmp = [
+                    f for f in _xml_all_sorted
+                    if not (f.description or "").startswith("[REFERENCJA]")
+                ]
+
+                with st.expander("📂 Wgraj plik referencyjny (target MusicXML)", expanded=False):
+                    _ref_upload = st.file_uploader(
+                        "Plik referencyjny (.musicxml / .mxl / .xml)",
+                        type=["musicxml", "mxl", "xml"],
+                        key=f"ref_upload_{selected_piece_id}",
+                    )
+                    if st.button(
+                        "Zapisz jako referencję",
+                        key=f"save_ref_{selected_piece_id}",
+                        disabled=_ref_upload is None,
+                    ):
+                        try:
+                            _rpath = FileService.save_uploaded_file(
+                                piece_id=selected_piece_id,
+                                filename=_ref_upload.name,
+                                file_data=_ref_upload.getbuffer(),
+                            )
+                            with get_db_session() as db2:
+                                _rmf = MusicFile(
+                                    music_piece_id=selected_piece_id,
+                                    file_path=_rpath,
+                                    file_type=FileType.XML,
+                                    original_filename=_ref_upload.name,
+                                    file_size=_ref_upload.size,
+                                    description=f"[REFERENCJA] {_ref_upload.name}",
+                                )
+                                db2.add(_rmf)
+                                db2.commit()
+                            st.session_state["processing_flash"] = {
+                                "piece_id": selected_piece_id,
+                                "message": (
+                                    f"✅ Plik referencyjny '{_ref_upload.name}' zapisany."
+                                ),
+                            }
+                            st.rerun()
+                        except Exception as _exc:
+                            logger.exception("save reference file failed")
+                            st.error(f"Błąd zapisu pliku referencyjnego: {str(_exc)}")
+
+                if not _xml_all_sorted:
+                    st.info(
+                        "Brak plików MusicXML. Uruchom pipeline (krok OMR) lub wgraj "
+                        "plik referencyjny powyżej."
+                    )
+                else:
+                    _pref_kw = ("krok 5", "krok 4", "final", "corrected")
+                    _def_cand = next(
+                        (
+                            f for f in reversed(_cand_files_cmp)
+                            if any(kw in (f.description or "").lower() for kw in _pref_kw)
+                        ),
+                        _cand_files_cmp[-1] if _cand_files_cmp else None,
+                    )
+
+                    def _flabel(f) -> str:
+                        _d = (f.description or "")[:50]
+                        return f"[{f.id}] {f.original_filename}" + (f" — {_d}" if _d else "")
+
+                    _cand_dict = {_flabel(f): f for f in _cand_files_cmp}
+                    _ref_dict = {_flabel(f): f for f in _ref_files_cmp}
+                    _cand_keys = list(_cand_dict.keys())
+                    _ref_keys = list(_ref_dict.keys())
+
+                    _cand_def_idx = max(
+                        0,
+                        next(
+                            (
+                                i for i, k in enumerate(_cand_keys)
+                                if _def_cand and _cand_dict[k].id == _def_cand.id
+                            ),
+                            len(_cand_keys) - 1,
+                        ),
+                    )
+                    _sel_c, _sel_r = st.columns(2)
+                    with _sel_c:
+                        _cand_sel = st.selectbox(
+                            "Plik wygenerowany (kandydat)",
+                            _cand_keys if _cand_keys else ["— brak —"],
+                            index=_cand_def_idx,
+                            key=f"cmp_cand_{selected_piece_id}",
+                            disabled=not bool(_cand_keys),
+                        )
+                    with _sel_r:
+                        _ref_sel = st.selectbox(
+                            "Plik referencyjny (target)",
+                            _ref_keys if _ref_keys else ["— brak —"],
+                            index=max(0, len(_ref_keys) - 1),
+                            key=f"cmp_ref_{selected_piece_id}",
+                            disabled=not bool(_ref_keys),
+                        )
+
+                    _cmp_ok = bool(_cand_keys) and bool(_ref_keys)
+                    if st.button(
+                        "📊 Porównaj",
+                        key=f"cmp_btn_{selected_piece_id}",
+                        disabled=not _cmp_ok,
+                        help=(
+                            None
+                            if _cmp_ok
+                            else "Wymagany co najmniej jeden plik kandydata i referencyjny."
+                        ),
+                    ):
+                        _cf = _cand_dict.get(_cand_sel)
+                        _rf = _ref_dict.get(_ref_sel)
+                        if _cf and _rf:
+                            with st.spinner("Porównuję pliki MusicXML…"):
+                                _cmp_res = compare_musicxml(_rf.file_path, _cf.file_path)
+                            if "error" in _cmp_res:
+                                st.error(f"Błąd porównania: {_cmp_res['error']}")
+                            else:
+                                _r = _cmp_res["ref"]
+                                _c2 = _cmp_res["conv"]
+                                _ok = "✅"
+                                _nok = "❌"
+                                _recall = _cmp_res["note_recall"]
+                                _ratio = _cmp_res["note_ratio"]
+                                _recall_icon = (
+                                    _ok
+                                    if _recall >= 0.9
+                                    else ("⚠️" if _recall >= 0.7 else _nok)
+                                )
+                                _ratio_icon = _ok if 0.9 <= _ratio <= 1.1 else _nok
+                                _r_fifths = (
+                                    str(_r["fifths"])
+                                    if _r["fifths"] is not None
+                                    else "—"
+                                )
+                                _c_fifths = (
+                                    str(_c2["fifths"])
+                                    if _c2["fifths"] is not None
+                                    else "—"
+                                )
+                                _rows = [
+                                    {
+                                        "Metryka": "Poprawny MusicXML",
+                                        "Referencja": "—",
+                                        "Kandydat": (
+                                            "tak" if _cmp_res["valid_musicxml"] else "NIE"
+                                        ),
+                                        "Wynik": (
+                                            _ok if _cmp_res["valid_musicxml"] else _nok
+                                        ),
+                                    },
+                                    {
+                                        "Metryka": "Format .mxl",
+                                        "Referencja": "—",
+                                        "Kandydat": (
+                                            ".mxl" if _cmp_res["is_mxl"] else ".xml"
+                                        ),
+                                        "Wynik": "—",
+                                    },
+                                    {
+                                        "Metryka": "Recall nut",
+                                        "Referencja": str(_r["notes"]),
+                                        "Kandydat": str(_c2["notes"]),
+                                        "Wynik": f"{_recall:.1%} {_recall_icon}",
+                                    },
+                                    {
+                                        "Metryka": "Stosunek nut (>1 = nadmiar)",
+                                        "Referencja": str(_r["notes"]),
+                                        "Kandydat": str(_c2["notes"]),
+                                        "Wynik": f"{_ratio:.2f} {_ratio_icon}",
+                                    },
+                                    {
+                                        "Metryka": "Takty (ref / kand)",
+                                        "Referencja": str(_r["measures"]),
+                                        "Kandydat": str(_c2["measures"]),
+                                        "Wynik": (
+                                            f"{_ok} zgodne (±1)"
+                                            if _cmp_res["measure_match"]
+                                            else f"{_nok} różne"
+                                        ),
+                                    },
+                                    {
+                                        "Metryka": "Partie / głosy",
+                                        "Referencja": str(_r["parts"]),
+                                        "Kandydat": str(_c2["parts"]),
+                                        "Wynik": (
+                                            f"{_ok} zgodne"
+                                            if _cmp_res["part_match"]
+                                            else f"{_nok} różne"
+                                        ),
+                                    },
+                                    {
+                                        "Metryka": "Tonacja (kwinty)",
+                                        "Referencja": _r_fifths,
+                                        "Kandydat": _c_fifths,
+                                        "Wynik": (
+                                            f"{_ok} zgodna"
+                                            if _cmp_res["key_match"]
+                                            else f"{_nok} różna"
+                                        ),
+                                    },
+                                    {
+                                        "Metryka": "Metrum",
+                                        "Referencja": str(_r["first_ts"] or "—"),
+                                        "Kandydat": str(_c2["first_ts"] or "—"),
+                                        "Wynik": (
+                                            f"{_ok} zgodne"
+                                            if _cmp_res["ts_match"]
+                                            else f"{_nok} różne"
+                                        ),
+                                    },
+                                ]
+                                st.table(_rows)
+                                st.metric(
+                                    "OVERALL (0–1)",
+                                    f"{_cmp_res['overall_score']:.3f}",
+                                    help=(
+                                        "Ważony wynik: recall nut ×0.50 + tonacja ×0.20"
+                                        " + metrum ×0.15 + partie ×0.15"
+                                    ),
+                                )
+                                if _cmp_res.get("valid_reason"):
+                                    st.caption(f"Walidacja: {_cmp_res['valid_reason']}")
 
                 st.markdown("---")
 

@@ -41,7 +41,8 @@ class MusicPiece(Base):
     liturgical_season = Column(String(100))  # e.g., "Advent", "Lent"
     language = Column(String(50))
     description = Column(Text)  # szczegółowy opis utworu
-    lyrics = Column(Text)  # tekst utworu
+    lyrics = Column(Text)  # tekst utworu (oryginał)
+    lyrics_translation_pl = Column(Text)  # tłumaczenie tekstu na polski (Gemini LLM)
     musescore_link = Column(String(512))  # link do zapisu w MuseScore
     notes = Column(Text)
     created_at = Column(DateTime, default=datetime.utcnow)
