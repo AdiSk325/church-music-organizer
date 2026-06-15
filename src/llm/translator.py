@@ -19,7 +19,7 @@ except Exception:  # pragma: no cover - exercised only without google-genai/pyda
                 setattr(self, key, value)
 
 
-from src.llm.client import LLMClient
+from src.llm.client import LLMClient, make_client
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +71,7 @@ def translate_to_polish(
             notes="Brak tekstu do przetłumaczenia.",
         )
 
-    client = client or LLMClient()
+    client = client or make_client()
     hint = f"(sugerowany język źródłowy: {source_language})\n\n" if source_language else ""
     user = f"{hint}Tekst pieśni do przetłumaczenia na polski:\n\n{text}"
     result = client.parse(_SYSTEM, user, TranslatedLyrics, step="text")

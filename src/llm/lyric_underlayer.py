@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, List, Optional
 
-from src.llm.client import LLMClient
+from src.llm.client import LLMClient, make_client
 from src.llm.musicxml_validate import validate_musicxml
 
 try:  # pydantic ships with google-genai; degrade gracefully when neither is installed
@@ -222,7 +222,7 @@ def underlay_lyrics(
         An :class:`UnderlayResult`; ``changed`` is False when no syllable could be placed
         or the result failed validation (the step-4 document is returned unchanged).
     """
-    client = client or LLMClient()
+    client = client or make_client()
 
     try:
         score = _load_score(musicxml)

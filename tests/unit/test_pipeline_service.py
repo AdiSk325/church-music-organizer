@@ -193,6 +193,13 @@ def _patch_engines(monkeypatch, *, ocr_text="raw text", omr_xml="/tmp/x.mxl"):
     )
     monkeypatch.setattr("src.services.pipeline_service.OCRService", ocr)
     monkeypatch.setattr("src.services.pipeline_service.OMRService", omr)
+    # Stub the metadata-extraction agent so the cascade never reaches a real LLM/CLI.
+    from src.llm.metadata_extractor import ExtractedMetadata
+
+    monkeypatch.setattr(
+        "src.llm.metadata_extractor.extract_metadata",
+        lambda *a, **k: ExtractedMetadata(),
+    )
 
 
 class TestRunFull:

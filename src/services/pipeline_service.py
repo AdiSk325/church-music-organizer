@@ -26,6 +26,7 @@ responsible for committing the session.**
 import json
 import logging
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -46,13 +47,29 @@ ProgressFn = Callable[[str, str], None]  # (step_name, status) -> None
 # both to render the processing-status panel and the progress bar.
 STEP_LABELS = {
     "ocr": "1. OCR (Tesseract)",
+    "metadata": "Metadane (LLM)",
     "clean_text": "2. Oczyszczanie tekstu (LLM)",
     "omr": "3. OMR (Audiveris)",
     "analysis": "Analiza partytury",
     "correct_score": "4. Korekta partytury (LLM)",
     "underlay": "5. Podkład tekstu (LLM)",
 }
-STEP_SEQUENCE = ["ocr", "clean_text", "omr", "analysis", "correct_score", "underlay"]
+STEP_SEQUENCE = ["ocr", "metadata", "clean_text", "omr", "analysis", "correct_score", "underlay"]
+
+# Mapping ExtractedMetadata field -> MusicPiece attribute. Only EMPTY MusicPiece fields are
+# filled, so the AI never overwrites what the user typed in by hand.
+_METADATA_FIELDS = [
+    ("title", "title"),
+    ("composer", "composer"),
+    ("music_author", "music_author"),
+    ("lyrics_author", "lyrics_author"),
+    ("arranger", "arranger"),
+    ("genre", "genre"),
+    ("language", "language"),
+    ("occasion", "occasion"),
+    ("liturgical_season", "liturgical_season"),
+    ("source_copyright", "notes"),
+]
 
 
 class PipelineService:
@@ -251,6 +268,68 @@ class PipelineService:
         )
         return result
 
+    def run_step_metadata(
+        self,
+        db: Session,
+        piece_id: int,
+        ocr_text: str,
+        *,
+        score_metadata: Optional[dict] = None,
+        source_file_id: Optional[int] = None,
+    ) -> dict:
+        """Extract header metadata (title/authors/…) and fill EMPTY MusicPiece fields only.
+
+        Never overwrites fields the user already filled. Returns the extracted values plus the
+        list of fields actually applied, so the UI can show what changed.
+        """
+        from src.llm.metadata_extractor import extract_metadata
+
+        if not (ocr_text and ocr_text.strip()) and not score_metadata:
+            detail = "Brak tekstu OCR do ekstrakcji metadanych."
+            self._record_step(
+                db, piece_id=piece_id, key="metadata", status="skipped", detail=detail,
+                source_file_id=source_file_id,
+            )
+            return {"status": "skipped", "detail": detail}
+
+        t0 = time.perf_counter()
+        meta = extract_metadata(ocr_text, score_metadata=score_metadata)
+        dur = int((time.perf_counter() - t0) * 1000)
+
+        piece: Optional[MusicPiece] = (
+            db.query(MusicPiece).filter(MusicPiece.id == piece_id).first()
+        )
+        if piece is None:
+            detail = f"Nie znaleziono utworu id={piece_id}."
+            self._record_step(
+                db, piece_id=piece_id, key="metadata", status="error", detail=detail,
+                source_file_id=source_file_id, duration_ms=dur,
+            )
+            return {"status": "error", "detail": detail}
+
+        extracted: dict = {}
+        applied: list[str] = []
+        for src_attr, dest_attr in _METADATA_FIELDS:
+            value = (getattr(meta, src_attr, "") or "").strip()
+            if value:
+                extracted[src_attr] = value
+            if value and not (getattr(piece, dest_attr, None) or "").strip():
+                setattr(piece, dest_attr, value)
+                applied.append(dest_attr)
+        db.flush()
+
+        detail = (
+            f"Uzupełniono pola: {', '.join(applied)}." if applied
+            else "Nie znaleziono nowych metadanych do uzupełnienia."
+        )
+        self._record_step(
+            db, piece_id=piece_id, key="metadata", status="ok", detail=detail,
+            report=(meta.notes or None),
+            data={"extracted": extracted, "applied": applied},
+            source_file_id=source_file_id, duration_ms=dur,
+        )
+        return {"status": "ok", "detail": detail, "extracted": extracted, "applied": applied}
+
     def run_step4_correct_score(
         self,
         db: Session,
@@ -295,9 +374,10 @@ class PipelineService:
         record = self._save_musicxml(
             db,
             piece_id,
-            self._derived_name(xml_path, prefix="corrected"),
             result.musicxml,
             description="Korekta partytury (LLM) — krok 4",
+            prefix="corrected",
+            source_path=xml_path,
             score=getattr(result, "score", None),
         )
         detail = "Zapisano poprawiony plik MusicXML."
@@ -373,13 +453,13 @@ class PipelineService:
                 "detail": detail,
             }
 
-        base = xml_path or "score.xml"
         record = self._save_musicxml(
             db,
             piece_id,
-            self._derived_name(base, prefix="final"),
             result.musicxml,
             description="Finalny MusicXML z podłożonym tekstem (LLM) — krok 5",
+            prefix="final",
+            source_path=xml_path or "score.xml",
             score=getattr(result, "score", None),
         )
         detail = "Zapisano finalny plik MusicXML z tekstem."
@@ -438,6 +518,22 @@ class PipelineService:
         except Exception as exc:
             logger.exception("run_full: OCR crashed")
             record(STEP_LABELS["ocr"], {"status": "error", "detail": str(exc)})
+
+        # --- Metadata extraction (LLM) — fills empty piece fields from the OCR header ---
+        if not self.llm_available():
+            record(STEP_LABELS["metadata"], _llm_unavailable())
+        elif not raw_text.strip():
+            record(
+                STEP_LABELS["metadata"],
+                {"status": "skipped", "detail": "Brak tekstu OCR — krok pominięty."},
+            )
+        else:
+            try:
+                rm = self.run_step_metadata(db, piece_id, raw_text, source_file_id=file_id)
+                record(STEP_LABELS["metadata"], rm)
+            except Exception as exc:
+                logger.exception("run_full: metadata crashed")
+                record(STEP_LABELS["metadata"], {"status": "error", "detail": str(exc)})
 
         # --- Step 2: clean text (LLM) ---
         clean_lyrics_text = ""
@@ -541,9 +637,11 @@ class PipelineService:
         self,
         db: Session,
         piece_id: int,
-        filename: str,
         xml_text: str,
         description: str,
+        *,
+        prefix: str,
+        source_path: str,
         score=None,
     ) -> MusicFile:
         """Persist a score as UNCOMPRESSED ``.musicxml`` (inspectable, MuseScore-compatible).
@@ -552,6 +650,11 @@ class PipelineService:
         element can be reviewed/edited and diffed precisely against a reference. When ``score``
         is provided (from a step 4/5 result) it is exported directly; otherwise ``xml_text`` is
         re-parsed. If normalisation fails the raw ``xml_text`` is saved as-is so nothing is lost.
+
+        The file is **versioned** within its ``prefix`` family (``corrected`` / ``final``): the
+        next free version number for this piece is computed and recorded on the row and woven
+        into the filename together with a creation timestamp, so the download list is
+        self-explanatory (which file is which, and which is newest).
         """
         out_text: Optional[str] = None
         try:
@@ -567,6 +670,8 @@ class PipelineService:
             )
             out_text = xml_text
 
+        version = self._next_version(db, piece_id, prefix)
+        filename = self._derived_name(source_path, prefix=prefix, version=version)
         stored_path = FileService.save_uploaded_file(
             piece_id=piece_id,
             filename=filename,
@@ -582,17 +687,40 @@ class PipelineService:
             mime_type="application/vnd.recordare.musicxml+xml",
             description=description,
             is_processed=1,
+            version=version,
         )
         db.add(record)
         db.flush()  # populate record.id
-        logger.info("pipeline: zapisano %s jako file_id=%s", path.name, record.id)
+        logger.info("pipeline: zapisano %s (wersja %s) jako file_id=%s", path.name, version, record.id)
         return record
 
     @staticmethod
-    def _derived_name(source_path: str, *, prefix: str) -> str:
-        """Build a ``<prefix>_<stem>.musicxml`` filename from a source path."""
+    def _next_version(db: Session, piece_id: int, prefix: str) -> int:
+        """Next free version number for this piece's ``<prefix>_*`` output family (1-based)."""
+        existing = (
+            db.query(MusicFile)
+            .filter(
+                MusicFile.music_piece_id == piece_id,
+                MusicFile.original_filename.like(f"{prefix}_%"),
+            )
+            .count()
+        )
+        return existing + 1
+
+    @staticmethod
+    def _derived_name(source_path: str, *, prefix: str, version: int = 1) -> str:
+        """Build a ``<prefix>_v<version>_<YYYYmmdd-HHMM>_<stem>.musicxml`` filename.
+
+        Encodes the output family, its version and the creation time directly in the name so a
+        downloaded file is identifiable on disk without the database.
+        """
         stem = Path(source_path).stem or "score"
-        return f"{prefix}_{stem}.musicxml"
+        # Strip any earlier pipeline prefix from the stem so names don't accrete (corrected_…).
+        for known in ("corrected_", "final_"):
+            if stem.startswith(known):
+                stem = stem[len(known):]
+        stamp = datetime.utcnow().strftime("%Y%m%d-%H%M")
+        return f"{prefix}_v{version}_{stamp}_{stem}.musicxml"
 
 
 def _analysis_detail(analysis: dict) -> str:

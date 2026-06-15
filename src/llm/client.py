@@ -115,22 +115,33 @@ def _api_key() -> Optional[str]:
 
 
 @lru_cache(maxsize=1)
-def llm_available() -> bool:
-    """Return True when the Gemini SDK is installed and an API key resolves.
-
-    A cheap, network-free probe: it checks that ``google-genai`` imports and that a
-    ``GEMINI_API_KEY`` / ``GOOGLE_API_KEY`` is present. The result is cached for the
-    process lifetime.
-    """
+def _gemini_ready() -> bool:
+    """True when the Gemini SDK is installed and an API key resolves (network-free probe)."""
     try:
         from google import genai  # noqa: F401
     except Exception:
-        logger.info("llm_available: pakiet 'google-genai' nie jest zainstalowany")
+        logger.info("_gemini_ready: pakiet 'google-genai' nie jest zainstalowany")
         return False
     if not _api_key():
-        logger.info("llm_available: brak klucza API Gemini (GEMINI_API_KEY/GOOGLE_API_KEY)")
+        logger.info("_gemini_ready: brak klucza API Gemini (GEMINI_API_KEY/GOOGLE_API_KEY)")
         return False
     return True
+
+
+def llm_available() -> bool:
+    """Return True when ANY LLM backend can run: Gemini (SDK+key) or the local ``claude`` CLI.
+
+    The CLI fallback means the pipeline's LLM steps stay usable when the Gemini quota is
+    exhausted or no key is set, as long as Claude Code is installed and authenticated.
+    """
+    if _gemini_ready():
+        return True
+    try:
+        from src.llm.claude_cli_client import claude_cli_available
+
+        return claude_cli_available()
+    except Exception:  # pragma: no cover - defensive
+        return False
 
 
 class LLMClient:
@@ -241,6 +252,80 @@ class LLMClient:
             f"Gemini nie zwrócił danych strukturalnych (step={step}, schema={schema.__name__}, "
             f"finish_reason={_finish_reason(response)})."
         )
+
+
+class FallbackClient:
+    """Try a primary LLM client; on quota/availability errors fall back to a secondary one.
+
+    Used to run on Gemini by default and transparently switch to the ``claude`` CLI when
+    Gemini returns 429 RESOURCE_EXHAUSTED / 503 etc., so a single exhausted quota does not
+    stop the pipeline.
+    """
+
+    def __init__(self, primary, fallback):
+        self._primary = primary
+        self._fallback = fallback
+
+    @staticmethod
+    def _is_recoverable(exc: Exception) -> bool:
+        s = str(exc).lower()
+        return any(
+            k in s
+            for k in ("429", "resource_exhausted", "quota", "503", "unavailable", "overloaded")
+        )
+
+    def complete_text(self, system: str, user: str, *, step: str) -> str:
+        try:
+            return self._primary.complete_text(system, user, step=step)
+        except Exception as exc:
+            if self._is_recoverable(exc):
+                logger.warning("LLM fallback (complete_text): %s — przełączam na claude CLI",
+                               str(exc)[:140])
+                return self._fallback.complete_text(system, user, step=step)
+            raise
+
+    def parse(self, system: str, user: str, schema, *, step: str):
+        try:
+            return self._primary.parse(system, user, schema, step=step)
+        except Exception as exc:
+            if self._is_recoverable(exc):
+                logger.warning("LLM fallback (parse): %s — przełączam na claude CLI",
+                               str(exc)[:140])
+                return self._fallback.parse(system, user, schema, step=step)
+            raise
+
+
+def make_client():
+    """Return the best available LLM client for the pipeline agents.
+
+    Honors ``CMO_LLM_BACKEND`` (``gemini`` | ``claude_cli`` | ``auto``; default ``auto``):
+    * ``auto`` — Gemini wrapped in a :class:`FallbackClient` to the ``claude`` CLI when both
+      exist; otherwise whichever single backend is available.
+    * ``gemini`` / ``claude_cli`` — force that backend.
+
+    Raises:
+        RuntimeError: when no backend is available (or the forced one is missing).
+    """
+    from src.llm.claude_cli_client import ClaudeCliClient, claude_cli_available
+
+    backend = (os.getenv("CMO_LLM_BACKEND") or "auto").strip().lower()
+
+    if backend == "claude_cli":
+        if claude_cli_available():
+            return ClaudeCliClient()
+        raise RuntimeError("CMO_LLM_BACKEND=claude_cli, ale CLI 'claude' jest niedostępne.")
+    if backend == "gemini":
+        return LLMClient()
+
+    gem = _gemini_ready()
+    cli = claude_cli_available()
+    if gem and cli:
+        return FallbackClient(LLMClient(), ClaudeCliClient())
+    if gem:
+        return LLMClient()
+    if cli:
+        return ClaudeCliClient()
+    raise RuntimeError("Brak dostępnego backendu LLM (ani Gemini, ani claude CLI).")
 
 
 def extract_musicxml(text: str) -> Optional[str]:

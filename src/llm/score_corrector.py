@@ -11,7 +11,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Optional
 
-from src.llm.client import LLMClient, extract_musicxml
+from src.llm.client import LLMClient, extract_musicxml, make_client
 from src.llm.musicxml_validate import validate_musicxml
 
 logger = logging.getLogger(__name__)
@@ -85,7 +85,7 @@ def correct_score(
         A :class:`ScoreCorrectionResult`. ``changed`` is False when the LLM produced no
         usable XML or it failed music21 validation (the original document is returned).
     """
-    client = client or LLMClient()
+    client = client or make_client()
     reply = client.complete_text(_SYSTEM, _build_user(musicxml, analysis_context), step="score")
 
     report = _extract_report(reply)

@@ -172,12 +172,13 @@ def _fmt_duration(ms) -> str:
 # Static fallback durations (seconds) for ETA when no run history exists per step key.
 _ETA_FALLBACK_S = {
     "ocr": 5,
+    "metadata": 8,
     "clean_text": 8,
     "omr": 90,
     "correct_score": 20,
     "underlay": 15,
 }
-_PIPELINE_STEP_KEYS = ["ocr", "clean_text", "omr", "correct_score", "underlay"]
+_PIPELINE_STEP_KEYS = ["ocr", "metadata", "clean_text", "omr", "correct_score", "underlay"]
 # Reverse mapping: step label → step key (used inside the ETA progress callback).
 _LABEL_TO_KEY = {v: k for k, v in STEP_LABELS.items() if k in _PIPELINE_STEP_KEYS}
 
@@ -776,7 +777,7 @@ elif page == "Song Details":
                                 for _sk in _PIPELINE_STEP_KEYS
                             }
                             # Pasek postępu z pomiarem upłyniętego czasu i ETA.
-                            _total = 5  # ocr, clean_text, omr, correct_score, underlay
+                            _total = 6  # ocr, metadata, clean_text, omr, correct_score, underlay
                             _prog = st.progress(0.0, text="Uruchamiam pipeline…")
                             _state = {"n": 0, "remaining": list(_PIPELINE_STEP_KEYS)}
                             _t_start = time.perf_counter()
@@ -911,6 +912,42 @@ elif page == "Song Details":
                                     logger.exception("clean text failed")
                                     st.error(f"Błąd czyszczenia tekstu: {str(_exc)}")
 
+                        # Metadata extraction — fills empty title/author fields from OCR header.
+                        if st.button(
+                            "🏷️ Wyciągnij metadane (LLM)",
+                            key=f"meta_{proc_file.id}",
+                            disabled=not (_llm_avail and _has_ocr_text),
+                            help=None if _has_ocr_text else "Najpierw uruchom OCR.",
+                        ):
+                            with st.spinner("Ekstrakcja metadanych (autorzy, tytuł) przez LLM..."):
+                                try:
+                                    with get_db_session() as db2:
+                                        rm = PipelineService().run_step_metadata(
+                                            db2,
+                                            selected_piece_id,
+                                            proc_file.extracted_text or "",
+                                            source_file_id=proc_file.id,
+                                        )
+                                        db2.commit()
+                                    if rm.get("status") == "ok":
+                                        _applied = rm.get("applied") or []
+                                        _msg = (
+                                            f"✅ Metadane: uzupełniono pola {', '.join(_applied)}."
+                                            if _applied
+                                            else "ℹ️ Nie znaleziono nowych metadanych "
+                                            "(pola już wypełnione lub brak danych w nagłówku)."
+                                        )
+                                        st.session_state["processing_flash"] = {
+                                            "piece_id": selected_piece_id,
+                                            "message": _msg,
+                                        }
+                                        st.rerun()
+                                    else:
+                                        st.info(rm.get("detail", "Pominięto."))
+                                except Exception as _exc:
+                                    logger.exception("metadata extraction failed")
+                                    st.error(f"Błąd ekstrakcji metadanych: {str(_exc)}")
+
                         # Correct + underlay — needs an existing MusicXML file for this piece.
                         _piece_xml = next(
                             (f for f in reversed(piece.files) if f.file_type == FileType.XML),
@@ -960,7 +997,7 @@ elif page == "Song Details":
                         "Wgraj plik w sekcji 'Upload Files' poniżej."
                     )
 
-                # Existing XML files (OMR output) available for download
+                # Existing XML files (OMR output) available for download — versioned & dated.
                 xml_files = [f for f in piece.files if f.file_type == FileType.XML]
                 if xml_files:
                     st.write("**Wygenerowane pliki MusicXML:**")
@@ -970,7 +1007,37 @@ elif page == "Song Details":
                         for s in latest_steps.values()
                         if s.output_file_id
                     }
-                    for xml_file in xml_files:
+
+                    def _file_kind(f) -> str:
+                        name = (f.original_filename or "").lower()
+                        if name.startswith("final_"):
+                            return "🎶 Finalny (z tekstem)"
+                        if name.startswith("corrected_"):
+                            return "🛠️ Korekta partytury"
+                        return "📄 MusicXML"
+
+                    # Newest file per kind = the current one to use.
+                    _newest_per_kind: dict = {}
+                    for f in xml_files:
+                        k = _file_kind(f)
+                        cur = _newest_per_kind.get(k)
+                        if cur is None or (f.created_at and cur.created_at and f.created_at > cur.created_at):
+                            _newest_per_kind[k] = f
+
+                    # Sort newest first so the most relevant downloads are on top.
+                    for xml_file in sorted(
+                        xml_files, key=lambda f: f.created_at or datetime.min, reverse=True
+                    ):
+                        _kind = _file_kind(xml_file)
+                        _ver = f"v{xml_file.version}" if xml_file.version else "—"
+                        _when = (
+                            xml_file.created_at.strftime("%Y-%m-%d %H:%M")
+                            if xml_file.created_at
+                            else "—"
+                        )
+                        _is_newest = _newest_per_kind.get(_kind) is xml_file
+                        _badge = "  ✅ **aktualna**" if _is_newest else ""
+                        st.markdown(f"**{_kind}** · {_ver} · 🕒 {_when}{_badge}")
                         _prov = _provenance.get(xml_file.id)
                         if _prov:
                             st.caption(f"↳ pochodzi z kroku: {_prov}")

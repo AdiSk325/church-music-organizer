@@ -78,6 +78,9 @@ class MusicFile(Base):
     is_processed = Column(Integer, default=0)  # 0 = not processed, 1 = processed
     extracted_text = Column(Text, nullable=True)  # wynik OCR
     ocr_confidence = Column(Integer, nullable=True)  # 0-100
+    # Wersja w obrębie "rodzaju" pliku wyjściowego (np. kolejne korekty / finalne pliki tego
+    # samego utworu). Nadawana przez PipelineService przy zapisie; None dla plików wgranych ręcznie.
+    version = Column(Integer, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     # Relationships

@@ -21,7 +21,7 @@ except Exception:  # pragma: no cover - exercised only without google-genai/pyda
                 setattr(self, key, value)
 
 
-from src.llm.client import LLMClient
+from src.llm.client import LLMClient, make_client
 
 logger = logging.getLogger(__name__)
 
@@ -83,7 +83,7 @@ def clean_lyrics(raw_text: str, client: Optional[LLMClient] = None) -> CleanedLy
     Returns:
         A :class:`CleanedLyrics` with detected language, cleaned text and notes.
     """
-    client = client or LLMClient()
+    client = client or make_client()
     filtered = _prefilter_ocr_noise(raw_text)
     if not filtered:
         logger.info("clean_lyrics: po filtrze szumu OCR nie został żaden tekst")
