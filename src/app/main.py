@@ -15,7 +15,16 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from sqlalchemy import func  # noqa: F401 — kept for future use
 
-from src.database import FileType, MusicFile, MusicPiece, Tag, UsageHistory, get_db_session, init_db
+from src.database import (
+    FileType,
+    MusicFile,
+    MusicFileKind,
+    MusicPiece,
+    Tag,
+    UsageHistory,
+    get_db_session,
+    init_db,
+)
 from src.services import (
     FileService,
     OCRService,
@@ -152,6 +161,55 @@ def attach_files(db, piece_id: int, uploaded_files, description: str = "") -> li
 UPLOAD_TYPES = ["pdf", "png", "jpg", "jpeg", "tiff", "bmp", "mscz", "mscx", "xml", "musicxml"]
 # File types that OCR / OMR can process
 OCR_TYPES = {FileType.SCAN, FileType.PDF}
+
+
+# ---------------------------------------------------------------------------
+# MusicFileKind helpers — kind-first, filename-prefix as fallback (kind=None)
+# These are needed because MusicFile.kind may be None for records that pre-date
+# task #1 and have not yet been migrated by scripts/migrate_to_library.py.
+# ---------------------------------------------------------------------------
+
+_KIND_DISPLAY: dict = {
+    MusicFileKind.FINAL: "🎶 Finalny (z tekstem)",
+    MusicFileKind.CORRECTED: "🛠️ Korekta partytury",
+    MusicFileKind.OMR_RAW: "📄 OMR (surowy)",
+    MusicFileKind.SOURCE_SCAN: "📄 OMR (surowy)",
+    MusicFileKind.SOURCE_PDF: "📄 OMR (surowy)",
+    MusicFileKind.EDITABLE: "📄 OMR (surowy)",
+    MusicFileKind.OTHER: "📄 OMR (surowy)",
+    MusicFileKind.REFERENCE: "📄 OMR (surowy)",  # reference files are filtered before display
+}
+
+
+def _resolve_xml_kind(f) -> str:
+    """Return the display-kind label for an XML MusicFile.
+
+    Resolution order:
+    1. MusicFile.kind (not None) — database-authoritative semantic kind.
+    2. Filename-prefix heuristic — legacy fallback for unmigrated records (kind=None).
+    Visual output is identical to the old heuristic so there is no UI regression.
+    """
+    if f.kind is not None:
+        return _KIND_DISPLAY.get(f.kind, "📄 OMR (surowy)")
+    # Fallback: brittle prefix convention (still needed while kind=None exists in DB)
+    name = (f.original_filename or "").lower()
+    if name.startswith("final_"):
+        return "🎶 Finalny (z tekstem)"
+    if name.startswith("corrected_"):
+        return "🛠️ Korekta partytury"
+    return "📄 OMR (surowy)"
+
+
+def _is_reference_file(f) -> bool:
+    """Return True when a MusicFile is a reference / ground-truth score.
+
+    Resolution order:
+    1. MusicFile.kind == REFERENCE — database-authoritative.
+    2. description.startswith('[REFERENCJA]') — legacy heuristic for kind=None records.
+    """
+    if f.kind is not None:
+        return f.kind == MusicFileKind.REFERENCE
+    return (f.description or "").startswith("[REFERENCJA]")
 
 
 # ---------------------------------------------------------------------------
@@ -1003,8 +1061,7 @@ elif page == "Song Details":
                 # / finalny), so the user sees the current artefacts, not the whole history.
                 xml_files = [
                     f for f in piece.files
-                    if f.file_type == FileType.XML
-                    and not (f.description or "").startswith("[REFERENCJA]")
+                    if f.file_type == FileType.XML and not _is_reference_file(f)
                 ]
                 if xml_files:
                     st.write("**Aktualne pliki MusicXML (najnowsze wersje):**")
@@ -1019,12 +1076,8 @@ elif page == "Song Details":
                     _KIND_ORDER = ["📄 OMR (surowy)", "🛠️ Korekta partytury", "🎶 Finalny (z tekstem)"]
 
                     def _file_kind(f) -> str:
-                        name = (f.original_filename or "").lower()
-                        if name.startswith("final_"):
-                            return "🎶 Finalny (z tekstem)"
-                        if name.startswith("corrected_"):
-                            return "🛠️ Korekta partytury"
-                        return "📄 OMR (surowy)"
+                        # kind-first; filename-prefix heuristic as fallback for kind=None records
+                        return _resolve_xml_kind(f)
 
                     # Keep only the newest file per kind.
                     _newest_per_kind: dict = {}
@@ -1114,7 +1167,7 @@ elif page == "Song Details":
                         st.markdown("**Tłumaczenie (PL)** (edytowalne)")
                         _edit_transl = st.text_area(
                             "tekst_transl",
-                            value=piece.lyrics_translation_pl or "",
+                            value=piece.primary_translation_pl or "",
                             height=220,
                             label_visibility="collapsed",
                             key=f"transl_{selected_piece_id}",
@@ -1142,22 +1195,35 @@ elif page == "Song Details":
                             st.error(f"Błąd zapisu tekstów: {str(_exc)}")
 
                 # Underlay the (possibly edited) lyrics onto the latest corrected / OMR score.
-                _under_src = next(
-                    (
-                        f for f in sorted(piece.files, key=lambda x: x.id, reverse=True)
-                        if f.file_type == FileType.XML
-                        and (f.original_filename or "").lower().startswith("corrected_")
-                    ),
-                    None,
-                ) or next(
-                    (
-                        f for f in sorted(piece.files, key=lambda x: x.id, reverse=True)
-                        if f.file_type == FileType.XML
-                        and not (f.description or "").startswith("[REFERENCJA]")
-                        and not (f.original_filename or "").lower().startswith("final_")
-                    ),
-                    None,
+                # Priority 1: kind-authoritative CORRECTED file (step-4 output).
+                # Priority 2: filename-prefix heuristic (unmigrated records with kind=None).
+                # Priority 3: any non-reference, non-final XML file.
+                _xml_for_underlay = sorted(
+                    (f for f in piece.files if f.file_type == FileType.XML),
+                    key=lambda x: x.id,
+                    reverse=True,
                 )
+                _under_src = next(
+                    (f for f in _xml_for_underlay if f.kind == MusicFileKind.CORRECTED), None
+                )
+                if _under_src is None:
+                    _under_src = next(
+                        (
+                            f for f in _xml_for_underlay
+                            if (f.original_filename or "").lower().startswith("corrected_")
+                        ),
+                        None,
+                    )
+                if _under_src is None:
+                    _under_src = next(
+                        (
+                            f for f in _xml_for_underlay
+                            if not _is_reference_file(f)
+                            and f.kind != MusicFileKind.FINAL
+                            and not (f.original_filename or "").lower().startswith("final_")
+                        ),
+                        None,
+                    )
                 _can_underlay = bool((piece.lyrics or "").strip()) and _under_src is not None
                 if st.button(
                     "🎶 Podłóż tekst do nut (krok 5)",
@@ -1190,7 +1256,7 @@ elif page == "Song Details":
 
                 _btn_transl_lbl = (
                     "🔁 Przetłumacz ponownie"
-                    if piece.lyrics_translation_pl
+                    if piece.primary_translation_pl
                     else "🌐 Przetłumacz na polski (Gemini)"
                 )
                 _can_translate = bool(piece.lyrics) and _llm_avail
@@ -1244,14 +1310,8 @@ elif page == "Song Details":
                     [f for f in piece.files if f.file_type == FileType.XML],
                     key=lambda f: f.id,
                 )
-                _ref_files_cmp = [
-                    f for f in _xml_all_sorted
-                    if (f.description or "").startswith("[REFERENCJA]")
-                ]
-                _cand_files_cmp = [
-                    f for f in _xml_all_sorted
-                    if not (f.description or "").startswith("[REFERENCJA]")
-                ]
+                _ref_files_cmp = [f for f in _xml_all_sorted if _is_reference_file(f)]
+                _cand_files_cmp = [f for f in _xml_all_sorted if not _is_reference_file(f)]
 
                 with st.expander("📂 Wgraj plik referencyjny (target MusicXML)", expanded=False):
                     _ref_upload = st.file_uploader(

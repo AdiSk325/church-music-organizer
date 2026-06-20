@@ -92,9 +92,36 @@ This project uses specialized Claude Code subagents. Invoke them by name when th
 
 Start a conversation with `product-owner` for strategic work and feature planning. Each agent's definition contains full project context so it can operate independently.
 
+## Database migrations
+
+**Alembic** (configured in `alembic.ini` with `render_as_batch=True` for SQLite) is the canonical
+tool for schema changes. Run `poetry run alembic upgrade head` to apply all migrations.
+
+The legacy `init_db()` in `src/database/database.py` (which uses `Base.metadata.create_all`)
+is retained for rapid test setup and first-time startup — it quickly creates all tables without
+running migration files. Use Alembic for **any new schema changes** going forward; `init_db()` is
+not modified by new migrations.
+
+Example workflow:
+```bash
+# After modifying src/database/models.py, generate a migration:
+poetry run alembic revision --autogenerate -m "your_description"
+
+# Apply it to development/production database:
+poetry run alembic upgrade head
+
+# Rollback one migration if needed:
+poetry run alembic downgrade -1
+```
+
 ## Key conventions
 
 - **File types** are controlled by the `FileType` enum in `models.py` (`SCAN`, `PDF`, `MUSESCORE`, `XML`, `TEXT`, `OTHER`). File type detection in the UI uses `python-magic` (requires system `libmagic`).
+- **Semantic file kinds** (`MusicFile.kind`) replace brittle filename prefixes — use enums like
+  `SOURCE_SCAN`, `OMR_RAW`, `CORRECTED`, `FINAL`, `EDITABLE` for categorization.
+- **Library root** (`CMO_LIBRARY_ROOT`, default `../church-music-library`) is the filesystem
+  source of truth for piece storage (metadata, scores, texts, knowledge). SQLite (`church_music.db`)
+  is a fast index. See plan in `docs/ROADMAP.md` and task #2 in the devops roadmap.
 - **Cascade deletes** are set on `MusicPiece` → `files` and `usage_history`. Deleting a piece removes all its files and history. Tags are not cascaded (shared across pieces).
 - **Line length**: 100 characters (Black/isort configured in `pyproject.toml`).
 - **Python target**: 3.8+ syntax.

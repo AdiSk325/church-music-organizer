@@ -1,3 +1,17 @@
+"""Alembic migration environment.
+
+This module configures Alembic to manage schema changes using SQLAlchemy ORM models.
+It reads DATABASE_URL from the environment (defaults to sqlite:///church_music.db).
+
+**Relationship to init_db():**
+- Alembic (via `alembic upgrade head`) is the canonical tool for applying schema changes
+  to production/long-lived databases.
+- The legacy `init_db()` in src/database/database.py (create_all + _sync_sqlite_columns) is
+  retained for rapid test setup and first-time app startup — it quickly scaffolds all tables
+  without running migration files, and it is not affected by new migrations.
+- Use Alembic for any new schema changes (add table, add column, add constraint).
+"""
+
 import os
 import sys
 from logging.config import fileConfig

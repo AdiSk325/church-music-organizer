@@ -16,8 +16,22 @@ class FileService:
         filename: str,
         file_data: bytes,
         upload_dir: str = "data/uploads",
+        use_library: bool = False,
+        piece: Optional[object] = None,
+        kind: Optional[object] = None,
     ) -> str:
-        """Save uploaded bytes to data/uploads/{piece_id}/{safe_filename}.
+        """Save uploaded bytes to storage.
+
+        When *use_library* is ``False`` (default) the file is saved under
+        ``{upload_dir}/{piece_id}/{safe_filename}`` — legacy behaviour, fully
+        backwards-compatible with existing callers and tests.
+
+        When *use_library* is ``True`` the file is routed through
+        :class:`~src.services.library_service.LibraryService` and placed in
+        the appropriate sub-directory of the piece's library folder (the
+        ``CMO_LIBRARY_ROOT`` tree).  In that mode *piece* (a ``MusicPiece``
+        ORM instance) is required; *kind* (a ``MusicFileKind`` value) defaults
+        to ``MusicFileKind.OTHER`` when omitted.
 
         The filename is sanitised to its basename only (strips path traversal
         sequences such as ``../``), and non-alphanumeric characters other than
@@ -28,11 +42,38 @@ class FileService:
             filename: Original filename provided by the uploader.
             file_data: Raw bytes of the file content.
             upload_dir: Root directory for uploads (relative to CWD or absolute).
+                Ignored when *use_library* is ``True``.
+            use_library: Route the file through LibraryService instead of the
+                legacy ``data/uploads/{piece_id}/`` path.
+            piece: ``MusicPiece`` ORM instance — required when *use_library* is
+                ``True``.
+            kind: ``MusicFileKind`` value — used by LibraryService to choose the
+                target sub-directory.  Defaults to ``MusicFileKind.OTHER`` when
+                *use_library* is ``True`` and *kind* is ``None``.
 
         Returns:
             Path of the saved file as a string (relative to CWD when
-            upload_dir is relative).
+            upload_dir is relative, or absolute when routed through
+            LibraryService).
+
+        Raises:
+            ValueError: If the sanitised path resolves outside the intended
+                directory (path-traversal guard), or if *use_library* is
+                ``True`` but *piece* is ``None``.
         """
+        if use_library:
+            if piece is None:
+                raise ValueError("piece must be provided when use_library=True")
+            # Import lazily to avoid circular imports at module level
+            from src.database.models import MusicFileKind  # noqa: PLC0415
+            from src.services.library_service import LibraryService  # noqa: PLC0415
+
+            effective_kind = kind if kind is not None else MusicFileKind.OTHER
+            return LibraryService.place_file(piece, file_data, effective_kind, filename)
+
+        # ------------------------------------------------------------------
+        # Legacy behaviour — unchanged; existing tests continue to pass
+        # ------------------------------------------------------------------
         dest_dir = Path(upload_dir) / str(piece_id)
         dest_dir.mkdir(parents=True, exist_ok=True)
 

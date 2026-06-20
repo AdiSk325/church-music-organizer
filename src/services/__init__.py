@@ -1,5 +1,6 @@
 from .analysis_service import AnalysisService
 from .file_service import FileService
+from .library_service import LibraryService
 from .music_piece_service import MusicPieceService
 from .ocr_service import OCRService
 from .omr_service import OMRService
@@ -9,6 +10,7 @@ from .processing_step_service import ProcessingStepService
 __all__ = [
     "AnalysisService",
     "FileService",
+    "LibraryService",
     "MusicPieceService",
     "OCRService",
     "OMRService",
