@@ -8,5 +8,5 @@ echo ""
 # Navigate to the correct directory
 cd "$(dirname "$0")"
 
-# Run the Streamlit app
-streamlit run src/app/main.py
+# Run the Streamlit app via Poetry
+poetry run streamlit run src/app/main.py

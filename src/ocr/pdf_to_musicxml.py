@@ -1,8 +1,10 @@
 """PDF → MusicXML conversion via Audiveris (OMR).
 
 Audiveris is a Java-based OMR engine.  This module wraps it as a subprocess.
-Audiveris must be installed and on PATH (or AUDIVERIS_JAR env var must point
-to the jar file).  See docs/knowledge/installation.md for setup instructions.
+Audiveris must be installed and discoverable via AUDIVERIS_PATH env var, PATH,
+or one of the well-known Windows / Linux install locations.  Alternatively,
+set AUDIVERIS_JAR to point directly to the fat-jar.
+See docs/knowledge/installation.md for setup instructions.
 
 Typical usage:
     converter = PdfToMusicXml()
@@ -23,23 +25,52 @@ logger = logging.getLogger(__name__)
 # Audiveris discovery
 # ---------------------------------------------------------------------------
 
+
 def _find_audiveris() -> Optional[str]:
-    """Return path to the audiveris executable or jar, or None if not found."""
-    # 1. Check AUDIVERIS_JAR env var (path to the fat jar)
+    """Return path to the Audiveris launcher (.exe/.bat), script, or jar.
+
+    Resolution order:
+      1. ``AUDIVERIS_PATH`` env var — path to the launcher/script (preferred)
+      2. ``AUDIVERIS_JAR`` env var  — path to the fat jar (java -jar invocation)
+      3. ``Audiveris`` / ``audiveris`` on system PATH
+      4. Known Windows install locations (D:\\Audiveris, Program Files, %LOCALAPPDATA%)
+      5. Known Linux / macOS install locations
+    """
+    # 1. Explicit launcher env var
+    path_env = os.environ.get("AUDIVERIS_PATH")
+    if path_env and Path(path_env).exists():
+        return path_env
+
+    # 2. Explicit jar env var
     jar_env = os.environ.get("AUDIVERIS_JAR")
     if jar_env and Path(jar_env).exists():
         return jar_env
 
-    # 2. Check if 'audiveris' command is on PATH
-    if shutil.which("audiveris"):
-        return "audiveris"
+    # 3. Executable on PATH (Windows launcher is capitalised "Audiveris")
+    for cmd in ("Audiveris", "audiveris"):
+        found = shutil.which(cmd)
+        if found:
+            return found
 
-    # 3. Common installation locations
-    candidates = [
+    # 4. Known locations — Windows-first when running on Windows
+    candidates: list[Path] = []
+    if os.name == "nt":
+        local_app = Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Audiveris"
+        candidates = [
+            Path(r"D:\Audiveris\Audiveris.exe"),
+            Path(r"C:\Program Files\Audiveris\Audiveris.exe"),
+            Path(r"C:\Program Files (x86)\Audiveris\Audiveris.exe"),
+            local_app / "Audiveris.exe",
+            Path.home() / "Audiveris" / "bin" / "Audiveris.bat",
+        ]
+
+    # 5. Linux / macOS locations (appended for cross-platform compat)
+    candidates += [
         Path.home() / "Audiveris" / "bin" / "Audiveris",
         Path("/opt/audiveris/bin/Audiveris"),
         Path("/usr/local/bin/audiveris"),
     ]
+
     for c in candidates:
         if c.exists():
             return str(c)
@@ -47,13 +78,24 @@ def _find_audiveris() -> Optional[str]:
     return None
 
 
-def _audiveris_available() -> bool:
+def audiveris_available() -> bool:
+    """Return True if Audiveris can be located on this machine.
+
+    Analogous to ``tesseract_available()`` in ``sheet_music_ocr.py``.
+    Used by the service / UI layers for graceful degradation when Audiveris
+    is not installed.
+    """
     return _find_audiveris() is not None
+
+
+# Private alias kept for backward compatibility within this module.
+_audiveris_available = audiveris_available
 
 
 # ---------------------------------------------------------------------------
 # Conversion
 # ---------------------------------------------------------------------------
+
 
 class PdfToMusicXml:
     """Convert a PDF (or image) score to MusicXML using Audiveris OMR."""
@@ -138,25 +180,33 @@ class PdfToMusicXml:
 
     def _build_command(self, input_path: str, output_dir: str) -> list:
         exe = self._exe or "audiveris"
+        exe_lower = exe.lower()
 
-        if exe.endswith(".jar"):
-            # Running via fat jar: java -jar audiveris.jar
+        if exe_lower.endswith(".jar"):
+            # Fat-jar invocation: requires an external Java runtime.
             return [
-                "java", "-jar", exe,
-                "-batch",
-                "-export",
-                "-output", output_dir,
-                "--", input_path,
-            ]
-        else:
-            # Running via wrapper script or binary
-            return [
+                "java",
+                "-jar",
                 exe,
                 "-batch",
                 "-export",
-                "-output", output_dir,
-                "--", input_path,
+                "-output",
+                output_dir,
+                "--",
+                input_path,
             ]
+
+        # .exe (Windows installer launcher) or .bat wrapper or plain script —
+        # all are called directly without "java -jar".
+        return [
+            exe,
+            "-batch",
+            "-export",
+            "-output",
+            output_dir,
+            "--",
+            input_path,
+        ]
 
     def conversion_quality_report(
         self,
@@ -173,6 +223,7 @@ class PdfToMusicXml:
         """
         try:
             from music21 import converter as m21converter
+
             orig = m21converter.parse(original_xml)
             conv = m21converter.parse(converted_xml)
         except Exception as exc:

@@ -41,7 +41,8 @@ class MusicPiece(Base):
     liturgical_season = Column(String(100))  # e.g., "Advent", "Lent"
     language = Column(String(50))
     description = Column(Text)  # szczegółowy opis utworu
-    lyrics = Column(Text)  # tekst utworu
+    lyrics = Column(Text)  # tekst utworu (oryginał)
+    lyrics_translation_pl = Column(Text)  # tłumaczenie tekstu na polski (Gemini LLM)
     musescore_link = Column(String(512))  # link do zapisu w MuseScore
     notes = Column(Text)
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -52,6 +53,12 @@ class MusicPiece(Base):
     tags = relationship("Tag", secondary="music_piece_tags", back_populates="music_pieces")
     usage_history = relationship(
         "UsageHistory", back_populates="music_piece", cascade="all, delete-orphan"
+    )
+    processing_steps = relationship(
+        "ProcessingStep",
+        back_populates="music_piece",
+        cascade="all, delete-orphan",
+        order_by="ProcessingStep.created_at",
     )
 
 
@@ -71,10 +78,41 @@ class MusicFile(Base):
     is_processed = Column(Integer, default=0)  # 0 = not processed, 1 = processed
     extracted_text = Column(Text, nullable=True)  # wynik OCR
     ocr_confidence = Column(Integer, nullable=True)  # 0-100
+    # Wersja w obrębie "rodzaju" pliku wyjściowego (np. kolejne korekty / finalne pliki tego
+    # samego utworu). Nadawana przez PipelineService przy zapisie; None dla plików wgranych ręcznie.
+    version = Column(Integer, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     # Relationships
     music_piece = relationship("MusicPiece", back_populates="files")
+
+
+class ProcessingStep(Base):
+    """A single recorded step of the transcription pipeline.
+
+    Append-only audit trail: every run of a step (OCR, text cleaning, OMR, analysis,
+    score correction, lyric underlay) writes one row, so intermediate results — status,
+    human-readable report and structured payload — survive page reloads and are shown
+    per-section in the UI. The newest row per ``step_key`` is the current result.
+    """
+
+    __tablename__ = "processing_steps"
+
+    id = Column(Integer, primary_key=True)
+    music_piece_id = Column(Integer, ForeignKey("music_pieces.id"), nullable=False)
+    source_file_id = Column(Integer, ForeignKey("music_files.id"), nullable=True)  # input
+    output_file_id = Column(Integer, ForeignKey("music_files.id"), nullable=True)  # produced
+    step_key = Column(String(50), nullable=False)  # ocr|clean_text|omr|analysis|correct_score|...
+    step_label = Column(String(255))  # human-readable name shown in the UI
+    status = Column(String(20), nullable=False)  # ok | skipped | error
+    detail = Column(Text)  # short one-line summary
+    report = Column(Text, nullable=True)  # full LLM/analysis report (markdown)
+    data_json = Column(Text, nullable=True)  # structured payload, e.g. ScoreDescriptor.to_dict()
+    duration_ms = Column(Integer, nullable=True)  # wall-clock time of the step
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    # Relationships
+    music_piece = relationship("MusicPiece", back_populates="processing_steps")
 
 
 class Tag(Base):

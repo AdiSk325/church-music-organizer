@@ -19,60 +19,186 @@ logger = logging.getLogger(__name__)
 _LANGUAGE_PROFILES = {
     "la": {  # Latin
         "keywords": {
-            "kyrie", "eleison", "christe", "gloria", "sanctus", "dominus",
-            "agnus", "dei", "miserere", "nobis", "dona", "pacem", "credo",
-            "deus", "jesu", "ave", "maria", "alleluia", "amen", "pater",
-            "noster", "lux", "aeterna", "requiem", "et", "in", "cum",
-            "spiritu", "benedictus", "hosanna", "excelsis", "magnificat",
+            "kyrie",
+            "eleison",
+            "christe",
+            "gloria",
+            "sanctus",
+            "dominus",
+            "agnus",
+            "dei",
+            "miserere",
+            "nobis",
+            "dona",
+            "pacem",
+            "credo",
+            "deus",
+            "jesu",
+            "ave",
+            "maria",
+            "alleluia",
+            "amen",
+            "pater",
+            "noster",
+            "lux",
+            "aeterna",
+            "requiem",
+            "et",
+            "in",
+            "cum",
+            "spiritu",
+            "benedictus",
+            "hosanna",
+            "excelsis",
+            "magnificat",
         },
         "char_pattern": r"[aeiou]{2,}",  # Latin has many vowel clusters
     },
     "pl": {  # Polish
         "keywords": {
-            "boże", "panie", "jezu", "chryste", "niebo", "ziemia", "święty",
-            "chwała", "błogosławiony", "alleluja", "amen", "przyjdź", "królestwo",
-            "miłość", "wiara", "nadzieja", "zbawienie", "kościół", "który",
-            "mój", "nasz", "twój", "jest", "się", "nie", "jak",
+            "boże",
+            "panie",
+            "jezu",
+            "chryste",
+            "niebo",
+            "ziemia",
+            "święty",
+            "chwała",
+            "błogosławiony",
+            "alleluja",
+            "amen",
+            "przyjdź",
+            "królestwo",
+            "miłość",
+            "wiara",
+            "nadzieja",
+            "zbawienie",
+            "kościół",
+            "który",
+            "mój",
+            "nasz",
+            "twój",
+            "jest",
+            "się",
+            "nie",
+            "jak",
         },
         "char_pattern": r"[ąęóśźżćń]",
     },
     "de": {  # German
         "keywords": {
-            "herr", "gott", "heilig", "ehre", "preis", "amen", "halleluja",
-            "freude", "liebe", "gnade", "heil", "erlösung", "seele",
-            "und", "der", "die", "das", "ist", "ich", "wir",
+            "herr",
+            "gott",
+            "heilig",
+            "ehre",
+            "preis",
+            "amen",
+            "halleluja",
+            "freude",
+            "liebe",
+            "gnade",
+            "heil",
+            "erlösung",
+            "seele",
+            "und",
+            "der",
+            "die",
+            "das",
+            "ist",
+            "ich",
+            "wir",
         },
         "char_pattern": r"[äöüß]",
     },
     "en": {  # English
         "keywords": {
-            "lord", "god", "holy", "glory", "praise", "amen", "alleluia",
-            "love", "grace", "salvation", "blessed", "heaven", "earth",
-            "the", "and", "is", "we", "our", "thy", "thee", "thou",
+            "lord",
+            "god",
+            "holy",
+            "glory",
+            "praise",
+            "amen",
+            "alleluia",
+            "love",
+            "grace",
+            "salvation",
+            "blessed",
+            "heaven",
+            "earth",
+            "the",
+            "and",
+            "is",
+            "we",
+            "our",
+            "thy",
+            "thee",
+            "thou",
         },
         "char_pattern": r"\bthe\b",
     },
     "cs": {  # Czech
         "keywords": {
-            "bože", "pane", "ježíši", "kříste", "sláva", "haleluja",
-            "amen", "láska", "víra", "naděje", "spasení",
-            "který", "naše", "tvoje", "jsme",
+            "bože",
+            "pane",
+            "ježíši",
+            "kříste",
+            "sláva",
+            "haleluja",
+            "amen",
+            "láska",
+            "víra",
+            "naděje",
+            "spasení",
+            "který",
+            "naše",
+            "tvoje",
+            "jsme",
         },
         "char_pattern": r"[áéíóúůýčďěňřšťž]",
     },
     "it": {  # Italian
         "keywords": {
-            "signore", "dio", "gesù", "cristo", "gloria", "alleluia",
-            "amen", "pace", "grazia", "salvezza", "benedetto",
-            "il", "la", "di", "che", "non", "per", "una",
+            "signore",
+            "dio",
+            "gesù",
+            "cristo",
+            "gloria",
+            "alleluia",
+            "amen",
+            "pace",
+            "grazia",
+            "salvezza",
+            "benedetto",
+            "il",
+            "la",
+            "di",
+            "che",
+            "non",
+            "per",
+            "una",
         },
         "char_pattern": r"\b(il|la|di|che)\b",
     },
     "fr": {  # French
         "keywords": {
-            "seigneur", "dieu", "jésus", "christ", "gloire", "alléluia",
-            "amen", "amour", "grâce", "salut", "béni",
-            "le", "la", "les", "de", "du", "et", "est",
+            "seigneur",
+            "dieu",
+            "jésus",
+            "christ",
+            "gloire",
+            "alléluia",
+            "amen",
+            "amour",
+            "grâce",
+            "salut",
+            "béni",
+            "le",
+            "la",
+            "les",
+            "de",
+            "du",
+            "et",
+            "est",
         },
         "char_pattern": r"[àâæçèêëîïôœùûü]",
     },
@@ -115,11 +241,13 @@ _SATB_EXPECTED = {
 
 def _pitch_to_midi(pitch_str: str) -> int:
     from music21 import pitch as p21
+
     return int(p21.Pitch(pitch_str).ps)
 
 
 def _midi_to_pitch(midi: int) -> str:
     from music21 import pitch as p21
+
     return str(p21.Pitch(midi).nameWithOctave)
 
 
@@ -150,6 +278,7 @@ def _analyze_voice_range(part: stream.Part) -> VoiceRange:
 # Texture classification
 # ---------------------------------------------------------------------------
 
+
 def _compute_texture(score: stream.Score) -> Tuple[str, float, float, float]:
     """Return (texture_type, rhythmic_variance, onset_simultaneity, voice_independence)."""
     parts = list(score.parts)
@@ -172,9 +301,7 @@ def _compute_texture(score: stream.Score) -> Tuple[str, float, float, float]:
     if not all_onsets:
         return ("monophonic", 0.0, 1.0, 0.0)
 
-    simultaneous = sum(
-        1 for o in all_onsets if all(o in p for p in part_onsets)
-    )
+    simultaneous = sum(1 for o in all_onsets if all(o in p for p in part_onsets))
     simultaneity = simultaneous / len(all_onsets)
 
     # Rhythmic variance: std dev of onset counts across parts (normalised)
@@ -196,12 +323,18 @@ def _compute_texture(score: stream.Score) -> Tuple[str, float, float, float]:
     else:
         texture_type = "polyphonic_imitative"
 
-    return (texture_type, round(rhythmic_variance, 3), round(simultaneity, 3), round(voice_independence, 3))
+    return (
+        texture_type,
+        round(rhythmic_variance, 3),
+        round(simultaneity, 3),
+        round(voice_independence, 3),
+    )
 
 
 # ---------------------------------------------------------------------------
 # Voice leading quality
 # ---------------------------------------------------------------------------
+
 
 def _analyze_voice_leading(score: stream.Score) -> Tuple[int, int, int, float]:
     """Return (parallel_5ths, parallel_8vas, crossings, contrary_ratio)."""
@@ -248,12 +381,19 @@ def _analyze_voice_leading(score: stream.Score) -> Tuple[int, int, int, float]:
 # Harmonic analysis
 # ---------------------------------------------------------------------------
 
-def _analyze_harmony(score: stream.Score) -> Tuple[Optional[str], float, Optional[str], float, Optional[str], List[str]]:
+
+def _analyze_harmony(
+    score: stream.Score,
+) -> Tuple[Optional[str], float, Optional[str], float, Optional[str], List[str]]:
     """Return (key_name, confidence, mode, chromatic_complexity, epoch, chord_types)."""
     try:
         key_result = score.analyze("key")
         key_name = str(key_result)
-        confidence = float(key_result.correlationCoefficient) if hasattr(key_result, "correlationCoefficient") else 0.5
+        confidence = (
+            float(key_result.correlationCoefficient)
+            if hasattr(key_result, "correlationCoefficient")
+            else 0.5
+        )
         mode = key_result.mode if hasattr(key_result, "mode") else "major"
     except Exception:
         key_name, confidence, mode = None, 0.0, None
@@ -298,12 +438,20 @@ def _analyze_harmony(score: stream.Score) -> Tuple[Optional[str], float, Optiona
     else:
         epoch = "contemporary"
 
-    return (key_name, round(confidence, 3), mode, round(chromatic_complexity, 3), epoch, chord_types)
+    return (
+        key_name,
+        round(confidence, 3),
+        mode,
+        round(chromatic_complexity, 3),
+        epoch,
+        chord_types,
+    )
 
 
 # ---------------------------------------------------------------------------
 # Lyrics extraction
 # ---------------------------------------------------------------------------
+
 
 def _extract_lyrics(score: stream.Score) -> Tuple[bool, str, float, str, float]:
     """Return (has_lyrics, language, lang_confidence, setting_type, notes_per_syllable)."""
@@ -347,6 +495,7 @@ def _extract_lyrics(score: stream.Score) -> Tuple[bool, str, float, str, float]:
 # Harmonic rhythm
 # ---------------------------------------------------------------------------
 
+
 def _harmonic_rhythm(score: stream.Score) -> str:
     try:
         chordified = score.chordify()
@@ -367,6 +516,7 @@ def _harmonic_rhythm(score: stream.Score) -> str:
 # Form detection (heuristic)
 # ---------------------------------------------------------------------------
 
+
 def _detect_form(score: stream.Score, voice_count: int) -> Tuple[str, bool, int, bool, bool]:
     """Return (form_type, has_repetition, section_count, has_imitation, is_canon)."""
     # Imitation detection: check if any two parts share a melodic fragment
@@ -380,7 +530,9 @@ def _detect_form(score: stream.Score, voice_count: int) -> Tuple[str, bool, int,
         for part in parts:
             ns = [n for n in part.flatten().notes if isinstance(n, note.Note)][:8]
             if len(ns) >= 2:
-                ivls = [int(interval.Interval(ns[i], ns[i + 1]).semitones) for i in range(len(ns) - 1)]
+                ivls = [
+                    int(interval.Interval(ns[i], ns[i + 1]).semitones) for i in range(len(ns) - 1)
+                ]
                 first_intervals.append(ivls)
 
         # If two parts share the same opening interval sequence (offset by time)
@@ -402,7 +554,11 @@ def _detect_form(score: stream.Score, voice_count: int) -> Tuple[str, bool, int,
 
     # Section count: count double barlines or rehearsal marks
     try:
-        barlines = [b for b in score.flatten().getElementsByClass("Barline") if b.type in ("double", "final")]
+        barlines = [
+            b
+            for b in score.flatten().getElementsByClass("Barline")
+            if b.type in ("double", "final")
+        ]
         section_count = max(1, len(barlines))
     except Exception:
         section_count = 1
@@ -429,6 +585,7 @@ def _detect_form(score: stream.Score, voice_count: int) -> Tuple[str, bool, int,
 # ---------------------------------------------------------------------------
 # Difficulty estimation
 # ---------------------------------------------------------------------------
+
 
 def _estimate_difficulty(
     voice_count: int,
@@ -496,6 +653,7 @@ def _estimate_difficulty(
 # Narrative generator
 # ---------------------------------------------------------------------------
 
+
 def _build_narrative(d: ScoreDescriptor) -> str:
     parts = []
 
@@ -536,8 +694,14 @@ def _build_narrative(d: ScoreDescriptor) -> str:
 
     if d.has_lyrics:
         lang_names = {
-            "la": "Latin", "pl": "Polish", "de": "German", "en": "English",
-            "cs": "Czech", "it": "Italian", "fr": "French", "unknown": "unknown language",
+            "la": "Latin",
+            "pl": "Polish",
+            "de": "German",
+            "en": "English",
+            "cs": "Czech",
+            "it": "Italian",
+            "fr": "French",
+            "unknown": "unknown language",
         }
         lang = lang_names.get(d.lyrics_language or "unknown", d.lyrics_language)
         parts.append(f"The text is in {lang} set in a {d.text_setting_type} style")
@@ -545,9 +709,7 @@ def _build_narrative(d: ScoreDescriptor) -> str:
         parts.append("No lyrics detected (instrumental or text not encoded)")
 
     if d.grade_label and d.estimated_grade:
-        parts.append(
-            f"Estimated difficulty: Grade {d.estimated_grade} ({d.grade_label})"
-        )
+        parts.append(f"Estimated difficulty: Grade {d.estimated_grade} ({d.grade_label})")
 
     return ". ".join(parts) + "."
 
@@ -555,6 +717,7 @@ def _build_narrative(d: ScoreDescriptor) -> str:
 # ---------------------------------------------------------------------------
 # Main analyzer
 # ---------------------------------------------------------------------------
+
 
 class ScoreAnalyzer:
     """Analyse a music21 Score and produce a ScoreDescriptor."""
@@ -645,8 +808,12 @@ class ScoreAnalyzer:
         # Difficulty
         max_range = max((vr.range_semitones for vr in d.voice_ranges), default=0)
         grade, label, factors = _estimate_difficulty(
-            d.voice_count, max_range, d.chromatic_complexity,
-            d.voice_independence, d.parallel_fifths_count, d.measure_count,
+            d.voice_count,
+            max_range,
+            d.chromatic_complexity,
+            d.voice_independence,
+            d.parallel_fifths_count,
+            d.measure_count,
         )
         d.estimated_grade = grade
         d.grade_label = label

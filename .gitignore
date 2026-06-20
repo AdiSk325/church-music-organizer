@@ -20,7 +20,11 @@ wheels/
 .installed.cfg
 *.egg
 
+# Secrets / local environment
+.env
+
 # Virtual Environment
+.venv/
 venv/
 env/
 ENV/
@@ -43,6 +47,9 @@ data/uploads/*
 data/processed/*
 !data/processed/.gitkeep
 
+# Tesseract language packs (large binaries, installed locally)
+data/tessdata/
+
 # Coverage
 .coverage
 htmlcov/
@@ -50,6 +57,12 @@ coverage.xml
 
 # Logs
 *.log
+
+# Local research / scratch artifacts (not source)
+resources/*.pdf
+agent/reports/
+*.omr
+*.mxl
 
 # OS
 .DS_Store
@@ -60,3 +73,6 @@ Thumbs.db
 
 # Claude Code
 .claude/worktrees/
+
+# Tests
+data/tests/*

@@ -7,14 +7,20 @@ RUN apt-get update && apt-get install -y \
     tesseract-ocr-eng \
     poppler-utils \
     libmagic1 \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Set working directory
+# Install Poetry
+RUN pip install --no-cache-dir poetry
+
 WORKDIR /app
 
-# Copy requirements and install Python dependencies
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Copy only dependency manifests first (cache layer)
+COPY pyproject.toml poetry.lock* ./
+
+# In the container we don't need a virtualenv — install globally
+RUN poetry config virtualenvs.create false \
+    && poetry install --without dev --no-interaction --no-ansi
 
 # Copy application code
 COPY . .

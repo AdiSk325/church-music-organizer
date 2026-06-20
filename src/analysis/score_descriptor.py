@@ -7,10 +7,10 @@ from typing import List, Optional
 @dataclass
 class VoiceRange:
     name: str
-    lowest_pitch: str       # scientific notation, e.g. "C4"
+    lowest_pitch: str  # scientific notation, e.g. "C4"
     highest_pitch: str
     range_semitones: int
-    tessitura_center: str   # approximate center pitch
+    tessitura_center: str  # approximate center pitch
 
 
 @dataclass
@@ -33,21 +33,27 @@ class ScoreDescriptor:
     # --- Key and harmony ---
     detected_key: Optional[str] = None
     key_confidence: float = 0.0
-    mode: Optional[str] = None          # "major" | "minor" | "modal" | "chromatic"
+    mode: Optional[str] = None  # "major" | "minor" | "modal" | "chromatic"
     modulations: List[str] = field(default_factory=list)
-    harmony_epoch: Optional[str] = None  # "medieval" | "renaissance" | "baroque" | "classical" | "romantic" | "contemporary"
-    chromatic_complexity: float = 0.0   # 0.0–1.0
+    harmony_epoch: Optional[str] = (
+        None  # "medieval" | "renaissance" | "baroque" | "classical" | "romantic" | "contemporary"
+    )
+    chromatic_complexity: float = 0.0  # 0.0–1.0
     harmonic_rhythm: Optional[str] = None  # "slow" | "moderate" | "fast"
     chord_vocabulary: List[str] = field(default_factory=list)
 
     # --- Texture ---
-    texture_type: Optional[str] = None   # "monophonic" | "homophonic_chorale" | "homophonic_melody" | "polyphonic_imitative" | "polyphonic_free"
+    texture_type: Optional[str] = (
+        None  # "monophonic" | "homophonic_chorale" | "homophonic_melody" | "polyphonic_imitative" | "polyphonic_free"
+    )
     rhythmic_variance: float = 0.0
-    onset_simultaneity: float = 0.0     # 0.0–1.0 (1.0 = all voices always together)
-    voice_independence: float = 0.0     # 0.0 (homorhythmic) – 1.0 (fully independent)
+    onset_simultaneity: float = 0.0  # 0.0–1.0 (1.0 = all voices always together)
+    voice_independence: float = 0.0  # 0.0 (homorhythmic) – 1.0 (fully independent)
 
     # --- Form ---
-    form_type: Optional[str] = None     # "strophic" | "through_composed" | "binary" | "ternary" | "canon" | "fugue" | etc.
+    form_type: Optional[str] = (
+        None  # "strophic" | "through_composed" | "binary" | "ternary" | "canon" | "fugue" | etc.
+    )
     has_repetition: bool = False
     section_count: int = 1
     has_imitation: bool = False
@@ -63,14 +69,14 @@ class ScoreDescriptor:
 
     # --- Lyrics ---
     has_lyrics: bool = False
-    lyrics_language: Optional[str] = None   # ISO 639-1: "la", "pl", "de", "en", etc.
+    lyrics_language: Optional[str] = None  # ISO 639-1: "la", "pl", "de", "en", etc.
     language_confidence: float = 0.0
     text_setting_type: Optional[str] = None  # "syllabic" | "neumatic" | "melismatic"
     notes_per_syllable_avg: float = 0.0
     has_word_painting: Optional[bool] = None
 
     # --- Difficulty ---
-    estimated_grade: int = 0           # 1–6 NYSSMA-style
+    estimated_grade: int = 0  # 1–6 NYSSMA-style
     grade_label: Optional[str] = None  # "elementary" | "intermediate" | "advanced"
     difficulty_factors: List[str] = field(default_factory=list)
 
@@ -83,9 +89,7 @@ class ScoreDescriptor:
         for f_name in self.__dataclass_fields__:
             value = getattr(self, f_name)
             if isinstance(value, list):
-                result[f_name] = [
-                    v.__dict__ if isinstance(v, VoiceRange) else v for v in value
-                ]
+                result[f_name] = [v.__dict__ if isinstance(v, VoiceRange) else v for v in value]
             else:
                 result[f_name] = value
         return result
