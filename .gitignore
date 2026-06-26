@@ -76,3 +76,4 @@ Thumbs.db
 
 # Tests
 data/tests/*
+backups/*

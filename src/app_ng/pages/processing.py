@@ -16,7 +16,7 @@ from pathlib import Path
 
 from nicegui import run, ui
 
-from src.database import FileType, MusicFile, MusicFileKind, get_db_session
+from src.database import FileType, MusicFile, MusicFileKind, MusicPiece, get_db_session
 from src.evaluation.reference_compare import compare_musicxml
 from src.services import (
     FileService,
@@ -28,13 +28,38 @@ from src.services import (
 )
 from src.services.pipeline_service import STEP_LABELS, STEP_SEQUENCE
 
-from ..shared import is_reference_file, state
+from ..shared import get_file_type, is_reference_file, state
 
 logger = logging.getLogger(__name__)
 
 _STATUS_ICON = {"ok": "✅", "skipped": "⏭️", "error": "❌"}
+
+
+def _file_kind_for_upload(filename: str) -> MusicFileKind:
+    """Map an uploaded filename to the appropriate semantic MusicFileKind.
+
+    PDF and image scans are source material; MuseScore files are editable scores;
+    XML/MusicXML uploaded by the user are treated as raw OMR output.
+    """
+    file_type = get_file_type(filename)
+    if file_type == FileType.PDF:
+        return MusicFileKind.SOURCE_PDF
+    if file_type == FileType.SCAN:
+        return MusicFileKind.SOURCE_SCAN
+    if file_type == FileType.MUSESCORE:
+        return MusicFileKind.EDITABLE
+    if file_type == FileType.XML:
+        return MusicFileKind.OMR_RAW
+    return MusicFileKind.OTHER
+
+
 _ETA_FALLBACK_S = {
-    "ocr": 5, "metadata": 8, "clean_text": 8, "omr": 90, "correct_score": 20, "underlay": 15,
+    "ocr": 5,
+    "metadata": 8,
+    "clean_text": 8,
+    "omr": 90,
+    "correct_score": 20,
+    "underlay": 15,
 }
 _PIPELINE_STEP_KEYS = ["ocr", "metadata", "clean_text", "omr", "correct_score", "underlay"]
 _LABEL_TO_KEY = {v: k for k, v in STEP_LABELS.items() if k in _PIPELINE_STEP_KEYS}
@@ -94,8 +119,12 @@ def _op_correct_underlay(piece_id: int, xml_path: str, xml_id: int, lyrics: str)
         underlaid = False
         if r4.get("status") == "ok" and (lyrics or "").strip():
             svc.run_step5_underlay(
-                db, piece_id, lyrics, xml_path=xml_path,
-                xml_content=r4.get("musicxml"), source_file_id=xml_id,
+                db,
+                piece_id,
+                lyrics,
+                xml_path=xml_path,
+                xml_content=r4.get("musicxml"),
+                source_file_id=xml_id,
             )
             underlaid = True
         db.commit()
@@ -124,9 +153,7 @@ def _on_progress(name: str, status: str) -> None:
     elapsed = time.perf_counter() - _run_state["t0"]
     eta = sum(_run_state["est"].get(k, 10) for k in _run_state["remaining"])
     icon = _STATUS_ICON.get(status, "•")
-    _run_state["last"] = (
-        f"{icon} {name} — {status} | upłynęło {_fmt(elapsed)}, ETA ~{_fmt(eta)}"
-    )
+    _run_state["last"] = f"{icon} {name} — {status} | upłynęło {_fmt(elapsed)}, ETA ~{_fmt(eta)}"
 
 
 @contextlib.asynccontextmanager
@@ -149,8 +176,12 @@ async def _busy(label: str):
 
 async def _run_full(piece_id: int, file_id: int, title: str) -> None:
     _run_state.update(
-        done=0, total=6, last="Uruchamiam pipeline…",
-        remaining=list(_PIPELINE_STEP_KEYS), t0=time.perf_counter(), est=_estimates(piece_id),
+        done=0,
+        total=6,
+        last="Uruchamiam pipeline…",
+        remaining=list(_PIPELINE_STEP_KEYS),
+        t0=time.perf_counter(),
+        est=_estimates(piece_id),
     )
     with ui.dialog().props("persistent") as dialog, ui.card().classes("w-96"):
         ui.label(f"Pełny pipeline: {title}").classes("font-bold")
@@ -227,13 +258,19 @@ def _collect(piece_id: int) -> dict | None:
             if step is None:
                 steps.append(("⬜", label, "nie uruchomiono", None))
             else:
-                steps.append((
-                    _STATUS_ICON.get(step.status, "•"), label, step.detail or "", step.report,
-                ))
+                steps.append(
+                    (
+                        _STATUS_ICON.get(step.status, "•"),
+                        label,
+                        step.detail or "",
+                        step.report,
+                    )
+                )
         # XML for correct/underlay: newest non-reference, non-final.
         xml_for_correct = next(
             (
-                f for f in reversed(piece.files)
+                f
+                for f in reversed(piece.files)
                 if f.file_type == FileType.XML and not is_reference_file(f)
             ),
             None,
@@ -254,7 +291,8 @@ def _collect(piece_id: int) -> dict | None:
             ],
             "xml_correct": (
                 {"id": xml_for_correct.id, "path": xml_for_correct.file_path}
-                if xml_for_correct else None
+                if xml_for_correct
+                else None
             ),
             "xml_all": sorted(
                 (
@@ -281,21 +319,38 @@ def _badges() -> None:
             ("Gemini (LLM)", PipelineService.llm_available()),
         ):
             color = "positive" if ok else "warning"
-            ui.badge(
-                f"{'✅' if ok else '⚠️'} {name}"
-            ).props(f"color={color}").classes("p-2 text-sm")
+            ui.badge(f"{'✅' if ok else '⚠️'} {name}").props(f"color={color}").classes(
+                "p-2 text-sm"
+            )
 
 
 async def _upload_source(piece_id: int, e) -> None:
+    """Save an uploaded source file (PDF / scan) to the piece's library folder."""
     data = e.content.read()
-    from ..shared import get_file_type
-
-    path = FileService.save_uploaded_file(piece_id=piece_id, filename=e.name, file_data=data)
+    kind = _file_kind_for_upload(e.name)
     with get_db_session() as db:
-        db.add(MusicFile(
-            music_piece_id=piece_id, file_path=path,
-            file_type=get_file_type(e.name), original_filename=e.name, file_size=len(data),
-        ))
+        piece = db.query(MusicPiece).filter(MusicPiece.id == piece_id).first()
+        if piece is None:
+            ui.notify("Nie znaleziono utworu.", type="negative")
+            return
+        path = FileService.save_uploaded_file(
+            piece_id=piece_id,
+            filename=e.name,
+            file_data=data,
+            use_library=True,
+            piece=piece,
+            kind=kind,
+        )
+        db.add(
+            MusicFile(
+                music_piece_id=piece_id,
+                file_path=path,
+                file_type=get_file_type(e.name),
+                original_filename=e.name,
+                file_size=len(data),
+                kind=kind,
+            )
+        )
         db.commit()
     ui.notify(f"Wgrano: {e.name}", type="positive")
     _panel.refresh()
@@ -339,7 +394,8 @@ def _panel() -> None:
     # --- Source upload ---
     with ui.expansion("📤 Wgraj plik źródłowy (PDF / skan)", icon="upload").classes("w-full"):
         ui.upload(
-            multiple=True, auto_upload=True,
+            multiple=True,
+            auto_upload=True,
             on_upload=lambda e: _upload_source(pid, e),
         ).props('accept=".pdf,.png,.jpg,.jpeg,.tiff,.bmp"').classes("w-full")
 
@@ -360,36 +416,49 @@ def _panel() -> None:
                 ui.button(
                     "🎼 OMR → MusicXML",
                     on_click=lambda sid=s["id"]: _run_single(
-                        "Konwersja PDF→MusicXML (Audiveris)…", _op_omr, sid,
+                        "Konwersja PDF→MusicXML (Audiveris)…",
+                        _op_omr,
+                        sid,
                         ok_msg="OMR zakończony.",
                     ),
                 ).props("flat").set_enabled(omr_ok)
                 ui.button(
                     "📝 OCR → tekst",
                     on_click=lambda sid=s["id"]: _run_single(
-                        "Ekstrakcja tekstu (Tesseract)…", _op_ocr, sid, ok_msg="OCR zakończony.",
+                        "Ekstrakcja tekstu (Tesseract)…",
+                        _op_ocr,
+                        sid,
+                        ok_msg="OCR zakończony.",
                     ),
                 ).props("flat").set_enabled(ocr_ok)
                 ui.button(
                     "🧹 Oczyść tekst (LLM)",
                     on_click=lambda sid=s["id"], tx=s["text"]: _run_single(
-                        "Czyszczenie tekstu (Gemini)…", _op_clean, pid, tx or "", sid,
+                        "Czyszczenie tekstu (Gemini)…",
+                        _op_clean,
+                        pid,
+                        tx or "",
+                        sid,
                         ok_msg="Tekst oczyszczony.",
                     ),
                 ).props("flat").set_enabled(llm and s["has_text"])
                 ui.button(
                     "🏷️ Metadane (LLM)",
                     on_click=lambda sid=s["id"], tx=s["text"]: _run_single(
-                        "Ekstrakcja metadanych (Gemini)…", _op_metadata, pid, tx or "", sid,
+                        "Ekstrakcja metadanych (Gemini)…",
+                        _op_metadata,
+                        pid,
+                        tx or "",
+                        sid,
                         ok_msg="Metadane zaktualizowane.",
                     ),
                 ).props("flat").set_enabled(llm and s["has_text"])
                 _xc = d["xml_correct"]
                 ui.button(
                     "🎶 Korekta (LLM) + podkład",
-                    on_click=lambda: _run_correct(
-                        pid, _xc["path"], _xc["id"], d["lyrics"]
-                    ) if _xc else None,
+                    on_click=lambda: (
+                        _run_correct(pid, _xc["path"], _xc["id"], d["lyrics"]) if _xc else None
+                    ),
                 ).props("flat").set_enabled(llm and _xc is not None)
 
     # --- Reference comparison ---
@@ -405,24 +474,44 @@ def _comparison(piece_id: int, xml_all: list) -> None:
     with ui.expansion("📂 Wgraj plik referencyjny (target MusicXML)", icon="upload").classes(
         "w-full"
     ):
+
         async def _save_ref(e) -> None:
+            """Save a reference MusicXML into the piece's library ``scores/`` folder."""
             data = e.content.read()
-            path = FileService.save_uploaded_file(
-                piece_id=piece_id, filename=e.name, file_data=data
-            )
             with get_db_session() as db:
-                db.add(MusicFile(
-                    music_piece_id=piece_id, file_path=path, file_type=FileType.XML,
-                    original_filename=e.name, file_size=len(data),
-                    kind=MusicFileKind.REFERENCE, description=f"[REFERENCJA] {e.name}",
-                ))
+                piece = db.query(MusicPiece).filter(MusicPiece.id == piece_id).first()
+                if piece is None:
+                    ui.notify("Nie znaleziono utworu.", type="negative")
+                    return
+                path = FileService.save_uploaded_file(
+                    piece_id=piece_id,
+                    filename=e.name,
+                    file_data=data,
+                    use_library=True,
+                    piece=piece,
+                    kind=MusicFileKind.REFERENCE,
+                )
+                db.add(
+                    MusicFile(
+                        music_piece_id=piece_id,
+                        file_path=path,
+                        file_type=FileType.XML,
+                        original_filename=e.name,
+                        file_size=len(data),
+                        kind=MusicFileKind.REFERENCE,
+                        description=f"[REFERENCJA] {e.name}",
+                    )
+                )
                 db.commit()
             ui.notify(f"Zapisano referencję: {e.name}", type="positive")
             _panel.refresh()
 
         ui.upload(
-            auto_upload=True, on_upload=_save_ref,
-        ).props('accept=".musicxml,.mxl,.xml"').classes("w-full")
+            auto_upload=True,
+            on_upload=_save_ref,
+        ).props(
+            'accept=".musicxml,.mxl,.xml"'
+        ).classes("w-full")
 
     if not xml_all:
         ui.label("Brak plików MusicXML. Uruchom OMR lub wgraj referencję.").classes(
@@ -437,9 +526,9 @@ def _comparison(piece_id: int, xml_all: list) -> None:
     cand_opts = {_flabel(f): f for f in cands}
     ref_opts = {_flabel(f): f for f in refs}
     if not cand_opts or not ref_opts:
-        ui.label(
-            "Wymagany co najmniej jeden plik kandydata i jeden referencyjny."
-        ).classes("text-grey text-sm")
+        ui.label("Wymagany co najmniej jeden plik kandydata i jeden referencyjny.").classes(
+            "text-grey text-sm"
+        )
         return
 
     cand_sel = ui.select(
@@ -474,23 +563,48 @@ def _render_comparison(res: dict) -> None:
     recall_icon = ok if recall >= 0.9 else ("⚠️" if recall >= 0.7 else nok)
     ratio_icon = ok if 0.9 <= ratio <= 1.1 else nok
     rows = [
-        {"m": "Poprawny MusicXML", "ref": "—",
-         "cand": "tak" if res["valid_musicxml"] else "NIE",
-         "res": ok if res["valid_musicxml"] else nok},
-        {"m": "Recall nut", "ref": str(r["notes"]), "cand": str(c["notes"]),
-         "res": f"{recall:.1%} {recall_icon}"},
-        {"m": "Stosunek nut (>1 = nadmiar)", "ref": str(r["notes"]), "cand": str(c["notes"]),
-         "res": f"{ratio:.2f} {ratio_icon}"},
-        {"m": "Takty", "ref": str(r["measures"]), "cand": str(c["measures"]),
-         "res": f"{ok} zgodne (±1)" if res["measure_match"] else f"{nok} różne"},
-        {"m": "Partie / głosy", "ref": str(r["parts"]), "cand": str(c["parts"]),
-         "res": f"{ok} zgodne" if res["part_match"] else f"{nok} różne"},
-        {"m": "Tonacja (kwinty)",
-         "ref": str(r["fifths"]) if r["fifths"] is not None else "—",
-         "cand": str(c["fifths"]) if c["fifths"] is not None else "—",
-         "res": f"{ok} zgodna" if res["key_match"] else f"{nok} różna"},
-        {"m": "Metrum", "ref": str(r["first_ts"] or "—"), "cand": str(c["first_ts"] or "—"),
-         "res": f"{ok} zgodne" if res["ts_match"] else f"{nok} różne"},
+        {
+            "m": "Poprawny MusicXML",
+            "ref": "—",
+            "cand": "tak" if res["valid_musicxml"] else "NIE",
+            "res": ok if res["valid_musicxml"] else nok,
+        },
+        {
+            "m": "Recall nut",
+            "ref": str(r["notes"]),
+            "cand": str(c["notes"]),
+            "res": f"{recall:.1%} {recall_icon}",
+        },
+        {
+            "m": "Stosunek nut (>1 = nadmiar)",
+            "ref": str(r["notes"]),
+            "cand": str(c["notes"]),
+            "res": f"{ratio:.2f} {ratio_icon}",
+        },
+        {
+            "m": "Takty",
+            "ref": str(r["measures"]),
+            "cand": str(c["measures"]),
+            "res": f"{ok} zgodne (±1)" if res["measure_match"] else f"{nok} różne",
+        },
+        {
+            "m": "Partie / głosy",
+            "ref": str(r["parts"]),
+            "cand": str(c["parts"]),
+            "res": f"{ok} zgodne" if res["part_match"] else f"{nok} różne",
+        },
+        {
+            "m": "Tonacja (kwinty)",
+            "ref": str(r["fifths"]) if r["fifths"] is not None else "—",
+            "cand": str(c["fifths"]) if c["fifths"] is not None else "—",
+            "res": f"{ok} zgodna" if res["key_match"] else f"{nok} różna",
+        },
+        {
+            "m": "Metrum",
+            "ref": str(r["first_ts"] or "—"),
+            "cand": str(c["first_ts"] or "—"),
+            "res": f"{ok} zgodne" if res["ts_match"] else f"{nok} różne",
+        },
     ]
     ui.table(
         columns=[

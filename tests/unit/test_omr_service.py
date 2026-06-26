@@ -334,10 +334,12 @@ class TestOMRServiceSuccess:
 
         ``save_uploaded_file`` is stubbed to return the temp output path itself, so
         ``musicxml_path`` stays equal to ``xml_output`` and no real analysis runs.
+        The stub accepts **kwargs so it stays compatible when callers pass
+        ``use_library=True``, ``piece=...``, ``kind=...``.
         """
         monkeypatch.setattr(
             "src.services.file_service.FileService.save_uploaded_file",
-            lambda piece_id, filename, file_data, upload_dir="data/uploads": str(xml_output),
+            lambda *_args, **_kwargs: str(xml_output),
         )
         monkeypatch.setattr(
             "src.services.analysis_service.AnalysisService.analyze_file",
@@ -499,9 +501,11 @@ class TestOMRServiceAutoAnalysis:
     @pytest.fixture(autouse=True)
     def _stub_filesvc(self, monkeypatch, xml_output):
         # Keep the output in tmp (no real data/uploads writes).
+        # Accept **kwargs so the stub stays compatible when callers pass
+        # use_library=True, piece=..., kind=... keywords.
         monkeypatch.setattr(
             "src.services.file_service.FileService.save_uploaded_file",
-            lambda piece_id, filename, file_data, upload_dir="data/uploads": str(xml_output),
+            lambda *_args, **_kwargs: str(xml_output),
         )
 
     @staticmethod

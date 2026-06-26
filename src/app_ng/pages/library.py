@@ -11,7 +11,7 @@ import logging
 
 from nicegui import ui
 
-from src.database import MusicFile, MusicPiece, Tag, get_db_session
+from src.database import FileType, MusicFile, MusicFileKind, MusicPiece, Tag, get_db_session
 from src.services import FileService, MusicPieceService
 
 from ..shared import OCCASIONS, PER_PAGE, SEASONS, get_file_type, state
@@ -22,13 +22,46 @@ logger = logging.getLogger(__name__)
 _view = {"search": "", "occasion": "", "season": "", "page": 0}
 
 
+def _file_kind_for_upload(filename: str) -> MusicFileKind:
+    """Map an uploaded filename to the appropriate semantic MusicFileKind.
+
+    PDF and image scans are source material; MuseScore files are editable scores;
+    XML/MusicXML uploaded by the user are treated as raw OMR output.
+    """
+    file_type = get_file_type(filename)
+    if file_type == FileType.PDF:
+        return MusicFileKind.SOURCE_PDF
+    if file_type == FileType.SCAN:
+        return MusicFileKind.SOURCE_SCAN
+    if file_type == FileType.MUSESCORE:
+        return MusicFileKind.EDITABLE
+    if file_type == FileType.XML:
+        return MusicFileKind.OMR_RAW
+    return MusicFileKind.OTHER
+
+
 def _save_uploaded(piece_id: int, upload) -> None:
-    """Persist one NiceGUI upload (``events.UploadEventArguments``) as a MusicFile."""
+    """Persist one NiceGUI upload (``events.UploadEventArguments``) as a MusicFile.
+
+    Routes through LibraryService (``use_library=True``) so every uploaded file lands
+    in the piece's library folder (``sources/`` for PDFs/scans, ``scores/`` for editable
+    scores, ``derived/`` for raw XML) rather than ``data/uploads/``.
+    """
     data = upload.content.read()
-    file_path = FileService.save_uploaded_file(
-        piece_id=piece_id, filename=upload.name, file_data=data
-    )
+    kind = _file_kind_for_upload(upload.name)
     with get_db_session() as db:
+        piece = db.query(MusicPiece).filter(MusicPiece.id == piece_id).first()
+        if piece is None:
+            logger.warning("_save_uploaded: piece id=%s not found — skipping upload", piece_id)
+            return
+        file_path = FileService.save_uploaded_file(
+            piece_id=piece_id,
+            filename=upload.name,
+            file_data=data,
+            use_library=True,
+            piece=piece,
+            kind=kind,
+        )
         db.add(
             MusicFile(
                 music_piece_id=piece_id,
@@ -36,6 +69,7 @@ def _save_uploaded(piece_id: int, upload) -> None:
                 file_type=get_file_type(upload.name),
                 original_filename=upload.name,
                 file_size=len(data),
+                kind=kind,
             )
         )
         db.commit()
@@ -84,8 +118,12 @@ def _piece_list() -> None:
         {"name": "title", "label": "Tytuł", "field": "title", "align": "left", "sortable": True},
         {"name": "lyrics_author", "label": "Autor słów", "field": "lyrics_author", "align": "left"},
         {"name": "music_author", "label": "Autor muzyki", "field": "music_author", "align": "left"},
-        {"name": "harmony_author", "label": "Autor harmonii", "field": "harmony_author",
-         "align": "left"},
+        {
+            "name": "harmony_author",
+            "label": "Autor harmonii",
+            "field": "harmony_author",
+            "align": "left",
+        },
         {"name": "key", "label": "Tonacja", "field": "key", "align": "left"},
         {"name": "time", "label": "Metrum", "field": "time", "align": "left"},
         {"name": "measures", "label": "Takty", "field": "measures", "align": "right"},
@@ -118,13 +156,15 @@ def _piece_list() -> None:
 
     # Pagination footer.
     with ui.row().classes("w-full items-center justify-center gap-4 mt-2"):
-        ui.button(icon="chevron_left", on_click=_prev_page).props("flat dense") \
-            .set_enabled(_view["page"] > 0)
-        ui.label(
-            f"Strona {_view['page'] + 1} / {total_pages}  ({total} utworów)"
-        ).classes("text-sm")
-        ui.button(icon="chevron_right", on_click=_next_page).props("flat dense") \
-            .set_enabled(_view["page"] < total_pages - 1)
+        ui.button(icon="chevron_left", on_click=_prev_page).props("flat dense").set_enabled(
+            _view["page"] > 0
+        )
+        ui.label(f"Strona {_view['page'] + 1} / {total_pages}  ({total} utworów)").classes(
+            "text-sm"
+        )
+        ui.button(icon="chevron_right", on_click=_next_page).props("flat dense").set_enabled(
+            _view["page"] < total_pages - 1
+        )
 
 
 def _prev_page() -> None:
@@ -195,9 +235,9 @@ def _add_piece_form() -> None:
             multiple=True,
             auto_upload=True,
             on_upload=pending_uploads.append,
-        ).props('accept=".pdf,.png,.jpg,.jpeg,.tiff,.bmp,.mscz,.mscx,.xml,.musicxml"').classes(
-            "w-full"
-        )
+        ).props(
+            'accept=".pdf,.png,.jpg,.jpeg,.tiff,.bmp,.mscz,.mscx,.xml,.musicxml"'
+        ).classes("w-full")
 
         def _submit() -> None:
             title = (inputs["title"].value or "").strip()
@@ -231,8 +271,15 @@ def _add_piece_form() -> None:
                     msg += f" {len(pending_uploads)} plik(ów) — uruchom OCR/OMR w Przetwarzaniu."
                 ui.notify(msg, type="positive")
                 # Reset the form and refresh the list.
-                for k in ("title", "lyrics_author", "music_author", "harmony_author",
-                          "key", "time", "tags"):
+                for k in (
+                    "title",
+                    "lyrics_author",
+                    "music_author",
+                    "harmony_author",
+                    "key",
+                    "time",
+                    "tags",
+                ):
                     inputs[k].value = ""
                 inputs["measures"].value = 0
                 pending_uploads.clear()
@@ -254,27 +301,19 @@ def render() -> None:
 
     ui.label("Kolekcja muzyczna").classes("text-lg font-semibold")
     with ui.row().classes("w-full gap-4 items-end"):
-        search = ui.input(
-            "Szukaj", placeholder="Tytuł, kompozytor, autor słów..."
-        ).classes("flex-1")
-        search.on(
-            "blur", lambda: (_view.update(search=search.value or ""), _on_filter_change())
+        search = ui.input("Szukaj", placeholder="Tytuł, kompozytor, autor słów...").classes(
+            "flex-1"
         )
+        search.on("blur", lambda: (_view.update(search=search.value or ""), _on_filter_change()))
         search.on(
             "keydown.enter",
             lambda: (_view.update(search=search.value or ""), _on_filter_change()),
         )
-        occasion = ui.select(
-            OCCASIONS, value="", label="Okazja"
-        ).classes("w-48")
+        occasion = ui.select(OCCASIONS, value="", label="Okazja").classes("w-48")
         occasion.on_value_change(
             lambda e: (_view.update(occasion=e.value or ""), _on_filter_change())
         )
-        season = ui.select(
-            SEASONS, value="", label="Okres liturgiczny"
-        ).classes("w-48")
-        season.on_value_change(
-            lambda e: (_view.update(season=e.value or ""), _on_filter_change())
-        )
+        season = ui.select(SEASONS, value="", label="Okres liturgiczny").classes("w-48")
+        season.on_value_change(lambda e: (_view.update(season=e.value or ""), _on_filter_change()))
 
     _piece_list()

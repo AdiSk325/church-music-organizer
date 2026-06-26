@@ -37,7 +37,6 @@ from src.database.models import (
 )
 from src.services.library_service import LibraryService
 
-
 # ---------------------------------------------------------------------------
 # Shared fixtures
 # ---------------------------------------------------------------------------
@@ -169,9 +168,7 @@ class TestWriteReadPieceYaml:
         assert data["composer"] == "Franz Schubert"
         assert data["slug"] == "ave-maria"
 
-    def test_round_trip_difficulty_fields(
-        self, db_session: Session, library_root: Path
-    ):
+    def test_round_trip_difficulty_fields(self, db_session: Session, library_root: Path):
         piece = MusicPiece(title="Kyrie", difficulty_grade=3, difficulty_notes="Wymaga SATB")
         piece.slug = "kyrie"
         db_session.add(piece)
@@ -300,9 +297,7 @@ class TestNewModels:
 
         assert sample_piece.primary_translation_pl == "Pełna łaski (primary)"
 
-    def test_primary_translation_pl_property_falls_back_to_legacy_column(
-        self, db_session: Session
-    ):
+    def test_primary_translation_pl_property_falls_back_to_legacy_column(self, db_session: Session):
         """When no Translation rows exist, the legacy column is returned."""
         piece = MusicPiece(title="Test", lyrics_translation_pl="Legacy translation")
         db_session.add(piece)
@@ -336,9 +331,7 @@ class TestNewModels:
 
         assert sample_piece.primary_translation_pl == "Newer"
 
-    def test_create_usage_category_and_assign(
-        self, db_session: Session, sample_piece: MusicPiece
-    ):
+    def test_create_usage_category_and_assign(self, db_session: Session, sample_piece: MusicPiece):
         cat = UsageCategory(name="Komunia", description="Pieśni na komunię")
         sample_piece.usage_categories.append(cat)
         db_session.add(cat)
@@ -370,16 +363,12 @@ class TestNewModels:
         db_session.add(note)
         db_session.commit()
 
-        fetched = (
-            db_session.query(KnowledgeNote).filter_by(music_piece_id=sample_piece.id).first()
-        )
+        fetched = db_session.query(KnowledgeNote).filter_by(music_piece_id=sample_piece.id).first()
         assert fetched is not None
         assert fetched.category == KnowledgeCategory.HISTORICAL
         assert fetched.body_md == "Utwór pochodzi z XVI wieku."
 
-    def test_cascade_delete_removes_source(
-        self, db_session: Session, sample_piece: MusicPiece
-    ):
+    def test_cascade_delete_removes_source(self, db_session: Session, sample_piece: MusicPiece):
         src = Source(
             music_piece_id=sample_piece.id,
             source_type=SourceType.LOCAL_UPLOAD,
@@ -470,9 +459,7 @@ def _make_in_memory_session() -> Session:
     return sessionmaker(bind=engine)()
 
 
-def _seed_db_with_uploads(
-    db: Session, uploads_dir: Path
-) -> tuple[MusicPiece, MusicPiece]:
+def _seed_db_with_uploads(db: Session, uploads_dir: Path) -> tuple[MusicPiece, MusicPiece]:
     """Seed the session with two pieces and actual files on disk."""
     piece1 = MusicPiece(
         title="Alleluja Wielkanocne",
@@ -522,9 +509,7 @@ def _seed_db_with_uploads(
 class TestMigrationDryRun:
     """Import run_migration directly and call with dry_run=True."""
 
-    def test_dry_run_creates_no_translations(
-        self, tmp_path: Path, library_root: Path
-    ):
+    def test_dry_run_creates_no_translations(self, tmp_path: Path, library_root: Path):
         from scripts.migrate_to_library import run_migration
 
         uploads_dir = tmp_path / "uploads"
@@ -537,9 +522,7 @@ class TestMigrationDryRun:
         assert db.query(Translation).count() == 0
         assert summary["translations_created"] == 1  # would be created for piece1
 
-    def test_dry_run_creates_no_sources(
-        self, tmp_path: Path, library_root: Path
-    ):
+    def test_dry_run_creates_no_sources(self, tmp_path: Path, library_root: Path):
         from scripts.migrate_to_library import run_migration
 
         uploads_dir = tmp_path / "uploads"
@@ -551,9 +534,7 @@ class TestMigrationDryRun:
 
         assert db.query(Source).count() == 0
 
-    def test_dry_run_does_not_move_files(
-        self, tmp_path: Path, library_root: Path
-    ):
+    def test_dry_run_does_not_move_files(self, tmp_path: Path, library_root: Path):
         from scripts.migrate_to_library import run_migration
 
         uploads_dir = tmp_path / "uploads"
@@ -569,9 +550,7 @@ class TestMigrationDryRun:
             assert mf.file_path in original_paths, "file_path changed during dry-run"
             assert Path(mf.file_path).exists(), "file was moved during dry-run"
 
-    def test_dry_run_returns_correct_counts(
-        self, tmp_path: Path, library_root: Path
-    ):
+    def test_dry_run_returns_correct_counts(self, tmp_path: Path, library_root: Path):
         from scripts.migrate_to_library import run_migration
 
         uploads_dir = tmp_path / "uploads"
@@ -586,9 +565,7 @@ class TestMigrationDryRun:
         assert summary["translations_created"] == 1  # only piece1 has translation
         assert summary["sources_created"] == 1  # only piece1 has musescore_link
 
-    def test_dry_run_does_not_write_yaml(
-        self, tmp_path: Path, library_root: Path
-    ):
+    def test_dry_run_does_not_write_yaml(self, tmp_path: Path, library_root: Path):
         from scripts.migrate_to_library import run_migration
 
         uploads_dir = tmp_path / "uploads"
@@ -606,9 +583,7 @@ class TestMigrationDryRun:
 class TestMigrationApply:
     """Apply migration on isolated tmp data and verify the outcome."""
 
-    def test_apply_moves_files_to_correct_subdirs(
-        self, tmp_path: Path, library_root: Path
-    ):
+    def test_apply_moves_files_to_correct_subdirs(self, tmp_path: Path, library_root: Path):
         from scripts.migrate_to_library import run_migration
 
         uploads_dir = tmp_path / "uploads"
@@ -621,29 +596,21 @@ class TestMigrationApply:
         db.refresh(piece2)
 
         # scan.pdf → sources/
-        source_files = [
-            mf for mf in piece1.files if "scan.pdf" in mf.file_path
-        ]
+        source_files = [mf for mf in piece1.files if "scan.pdf" in mf.file_path]
         assert len(source_files) == 1
         assert "sources" in source_files[0].file_path
 
         # final_score.xml → scores/ (FINAL kind)
-        final_files = [
-            mf for mf in piece1.files if "final_score.xml" in mf.file_path
-        ]
+        final_files = [mf for mf in piece1.files if "final_score.xml" in mf.file_path]
         assert len(final_files) == 1
         assert "scores" in final_files[0].file_path
 
         # corrected_score.xml → scores/ (CORRECTED kind)
-        corrected_files = [
-            mf for mf in piece2.files if "corrected_score.xml" in mf.file_path
-        ]
+        corrected_files = [mf for mf in piece2.files if "corrected_score.xml" in mf.file_path]
         assert len(corrected_files) == 1
         assert "scores" in corrected_files[0].file_path
 
-    def test_apply_creates_translation_row(
-        self, tmp_path: Path, library_root: Path
-    ):
+    def test_apply_creates_translation_row(self, tmp_path: Path, library_root: Path):
         from scripts.migrate_to_library import run_migration
 
         uploads_dir = tmp_path / "uploads"
@@ -661,9 +628,7 @@ class TestMigrationApply:
         assert len(translations) == 1
         assert "Alleluja" in translations[0].text
 
-    def test_apply_creates_source_row(
-        self, tmp_path: Path, library_root: Path
-    ):
+    def test_apply_creates_source_row(self, tmp_path: Path, library_root: Path):
         from scripts.migrate_to_library import run_migration
 
         uploads_dir = tmp_path / "uploads"
@@ -681,9 +646,7 @@ class TestMigrationApply:
         assert len(sources) == 1
         assert "alleluja" in sources[0].url
 
-    def test_apply_sets_kind_and_opens_externally(
-        self, tmp_path: Path, library_root: Path
-    ):
+    def test_apply_sets_kind_and_opens_externally(self, tmp_path: Path, library_root: Path):
         from scripts.migrate_to_library import run_migration
 
         uploads_dir = tmp_path / "uploads"
@@ -699,9 +662,7 @@ class TestMigrationApply:
         editable_files = [mf for mf in piece1.files if mf.kind == MusicFileKind.FINAL]
         assert all(mf.opens_externally for mf in editable_files)
 
-    def test_apply_idempotent_no_duplicate_translations(
-        self, tmp_path: Path, library_root: Path
-    ):
+    def test_apply_idempotent_no_duplicate_translations(self, tmp_path: Path, library_root: Path):
         from scripts.migrate_to_library import run_migration
 
         uploads_dir = tmp_path / "uploads"
@@ -721,9 +682,7 @@ class TestMigrationApply:
         )
         assert count == 1
 
-    def test_apply_idempotent_no_duplicate_sources(
-        self, tmp_path: Path, library_root: Path
-    ):
+    def test_apply_idempotent_no_duplicate_sources(self, tmp_path: Path, library_root: Path):
         from scripts.migrate_to_library import run_migration
 
         uploads_dir = tmp_path / "uploads"
@@ -742,9 +701,7 @@ class TestMigrationApply:
         )
         assert count == 1
 
-    def test_apply_writes_piece_yaml(
-        self, tmp_path: Path, library_root: Path
-    ):
+    def test_apply_writes_piece_yaml(self, tmp_path: Path, library_root: Path):
         from scripts.migrate_to_library import run_migration
 
         uploads_dir = tmp_path / "uploads"
@@ -758,9 +715,7 @@ class TestMigrationApply:
         yaml_files = list(pieces_dir.rglob("piece.yaml"))
         assert len(yaml_files) >= 1
 
-    def test_apply_writes_lyrics_md(
-        self, tmp_path: Path, library_root: Path
-    ):
+    def test_apply_writes_lyrics_md(self, tmp_path: Path, library_root: Path):
         from scripts.migrate_to_library import run_migration
 
         uploads_dir = tmp_path / "uploads"

@@ -392,37 +392,63 @@ class LibraryService:
         --------
         - Scans ``library_root()/pieces/`` for directories matching the pattern
           ``<id:04d>_<slug>`` (e.g. ``0001_ave-maria``).
-        - For each directory, reads ``piece.yaml`` if present.
-        - Upserts the SQLite ``MusicPiece`` row: updates ``slug``,
-          ``difficulty_grade`` and ``difficulty_notes`` from the YAML.
-          Does **not** overwrite ``title``/``composer`` from YAML (the DB is
-          the source of truth for those fields; the YAML is written *from* the
-          DB by :meth:`write_piece_yaml`).
-        - Returns a summary dict ``{"scanned": N, "updated": M}``.
+        - For each directory, reads ``piece.yaml`` (slug, difficulty, sources,
+          usage_categories) and scans ``texts/translation_<lang>_<kind>.md``
+          and ``knowledge/<category>_<slug>.md`` files.
+        - Upserts: ``MusicPiece.slug``/difficulty, ``Source``, ``Translation``,
+          ``UsageCategory`` (M2M), ``KnowledgeNote`` rows.
+        - Does **not** overwrite ``title``/``composer`` from YAML — the DB is
+          the source of truth for those fields; YAML is written *from* the DB.
+        - Idempotent: repeated calls produce the same state with no duplicates.
+          Natural keys used per entity:
 
-        Note
-        ----
-        Full upsert logic (Source, Translation, UsageCategory rows) is deferred
-        to a later task (qa-engineer / devops-engineer).  This implementation
-        establishes the scanning loop, YAML parsing, and slug/difficulty sync.
+          - ``Source``: ``(music_piece_id, source_type, url, label, event_name, ensemble)``
+          - ``Translation``: ``(music_piece_id, language, kind)``
+          - ``UsageCategory``: ``name`` (global); link: ``(piece_id, category_id)``
+          - ``KnowledgeNote``: ``(music_piece_id, category, title)``
 
         Args:
             db: An active SQLAlchemy ``Session`` instance.
 
         Returns:
-            Summary dict with keys ``"scanned"`` and ``"updated"``.
+            Summary dict with keys ``"scanned"``, ``"updated"``, ``"sources"``,
+            ``"translations"``, ``"categories"``, ``"knowledge"``.
         """
         # Import inside method to avoid circular import at module level
-        from src.database.models import MusicPiece  # noqa: PLC0415
+        from src.database.models import (  # noqa: PLC0415
+            KnowledgeCategory,
+            KnowledgeNote,
+            MusicPiece,
+            PieceUsageCategory,
+            RightsStatus,
+            Source,
+            SourceType,
+            Translation,
+            TranslationKind,
+            UsageCategory,
+        )
 
         root = LibraryService.library_root()
         pieces_dir = root / "pieces"
         if not pieces_dir.exists():
-            return {"scanned": 0, "updated": 0}
+            return {
+                "scanned": 0,
+                "updated": 0,
+                "sources": 0,
+                "translations": 0,
+                "categories": 0,
+                "knowledge": 0,
+            }
 
         scanned = 0
         updated = 0
+        sources_count = 0
+        translations_count = 0
+        categories_count = 0
+        knowledge_count = 0
         dir_pattern = re.compile(r"^(\d{4})_(.+)$")
+        # Pre-build set of valid KnowledgeCategory values for fast lookup
+        _known_categories = {c.value for c in KnowledgeCategory}
 
         for entry in sorted(pieces_dir.iterdir()):
             if not entry.is_dir():
@@ -432,7 +458,11 @@ class LibraryService:
                 continue
 
             piece_id = int(match.group(1))
-            slug_from_dir = match.group(2)
+            # Sanitise the slug taken from the directory name: a hand-crafted
+            # directory like ``0001_../../evil`` would otherwise flow into
+            # ``piece_dir()`` and escape library_root (path traversal). Same
+            # normalisation as ``slugify`` so values stay consistent.
+            slug_from_dir = re.sub(r"[^\w\-]", "-", match.group(2)).strip("-") or "slug"
             scanned += 1
 
             yaml_data: Dict[str, Any] = {}
@@ -450,12 +480,17 @@ class LibraryService:
 
             dirty = False
 
+            # ------------------------------------------------------------------
+            # 1. Slug + difficulty sync
+            # ------------------------------------------------------------------
             if piece.slug != slug_from_dir:
                 piece.slug = slug_from_dir
                 dirty = True
 
             difficulty_grade = yaml_data.get("difficulty_grade")
-            if difficulty_grade is not None and hasattr(piece, "difficulty_grade"):
+            # difficulty_grade is an Integer column; YAML may yield a non-int
+            # (e.g. "moderate") which would corrupt the row on flush — skip it.
+            if isinstance(difficulty_grade, int) and hasattr(piece, "difficulty_grade"):
                 if piece.difficulty_grade != difficulty_grade:
                     piece.difficulty_grade = difficulty_grade
                     dirty = True
@@ -466,7 +501,224 @@ class LibraryService:
                     piece.difficulty_notes = difficulty_notes
                     dirty = True
 
+            # ------------------------------------------------------------------
+            # 2. Source upsert from piece.yaml
+            # ------------------------------------------------------------------
+            for src_dict in yaml_data.get("sources", []) or []:
+                type_val = src_dict.get("type") or ""
+                try:
+                    source_type = SourceType(type_val)
+                except ValueError:
+                    logger.warning("Unknown source type %r in %s — skipping", type_val, yaml_path)
+                    continue
+
+                rights_val = src_dict.get("rights_status") or "unknown"
+                try:
+                    rights_status = RightsStatus(rights_val)
+                except ValueError:
+                    rights_status = RightsStatus.UNKNOWN
+
+                src_url = src_dict.get("url")
+                src_label = src_dict.get("label")
+                src_event = src_dict.get("event_name")
+                src_ensemble = src_dict.get("ensemble")
+
+                existing_src = (
+                    db.query(Source)
+                    .filter(
+                        Source.music_piece_id == piece_id,
+                        Source.source_type == source_type,
+                        Source.url == src_url,
+                        Source.label == src_label,
+                        Source.event_name == src_event,
+                        Source.ensemble == src_ensemble,
+                    )
+                    .first()
+                )
+                if existing_src is None:
+                    db.add(
+                        Source(
+                            music_piece_id=piece_id,
+                            source_type=source_type,
+                            url=src_url,
+                            label=src_label,
+                            rights_status=rights_status,
+                            event_name=src_event,
+                            ensemble=src_ensemble,
+                        )
+                    )
+                    sources_count += 1
+                    dirty = True
+                elif existing_src.rights_status != rights_status:
+                    existing_src.rights_status = rights_status
+                    sources_count += 1
+                    dirty = True
+
+            # ------------------------------------------------------------------
+            # 3. Translation upsert from texts/translation_<lang>_<kind>.md
+            # ------------------------------------------------------------------
+            texts_dir = entry / "texts"
+            if texts_dir.exists():
+                _tr_pattern = re.compile(r"^translation_([a-z]{2,5})_([a-z]+)\.md$")
+                for text_file in sorted(texts_dir.iterdir()):
+                    if not text_file.is_file():
+                        continue
+                    m = _tr_pattern.match(text_file.name)
+                    if not m:
+                        continue
+
+                    lang = m.group(1)
+                    kind_val = m.group(2)
+                    try:
+                        kind = TranslationKind(kind_val)
+                    except ValueError:
+                        logger.warning(
+                            "Unknown TranslationKind %r in %s — skipping",
+                            kind_val,
+                            text_file,
+                        )
+                        continue
+
+                    text_content = text_file.read_text(encoding="utf-8")
+
+                    existing_tr = (
+                        db.query(Translation)
+                        .filter(
+                            Translation.music_piece_id == piece_id,
+                            Translation.language == lang,
+                            Translation.kind == kind,
+                        )
+                        .first()
+                    )
+                    if existing_tr is None:
+                        # Mark as primary if no other primary for this lang exists yet
+                        already_primary = (
+                            db.query(Translation)
+                            .filter(
+                                Translation.music_piece_id == piece_id,
+                                Translation.language == lang,
+                                Translation.is_primary.is_(True),
+                            )
+                            .count()
+                        ) > 0
+                        db.add(
+                            Translation(
+                                music_piece_id=piece_id,
+                                language=lang,
+                                kind=kind,
+                                text=text_content,
+                                source="reindex",
+                                is_primary=(not already_primary),
+                            )
+                        )
+                        translations_count += 1
+                        dirty = True
+                    elif existing_tr.text != text_content:
+                        existing_tr.text = text_content
+                        translations_count += 1
+                        dirty = True
+
+            # ------------------------------------------------------------------
+            # 4. UsageCategory M2M upsert from piece.yaml
+            # ------------------------------------------------------------------
+            for cat_name in yaml_data.get("usage_categories", []) or []:
+                if not cat_name:
+                    continue
+                uc = db.query(UsageCategory).filter(UsageCategory.name == cat_name).first()
+                if uc is None:
+                    uc = UsageCategory(name=cat_name)
+                    db.add(uc)
+                    # Newly created — cannot be linked yet; append directly.
+                    piece.usage_categories.append(uc)
+                    categories_count += 1
+                    dirty = True
+                else:
+                    # Existing category — check association table to avoid duplicates.
+                    link_exists = (
+                        db.query(PieceUsageCategory)
+                        .filter(
+                            PieceUsageCategory.music_piece_id == piece_id,
+                            PieceUsageCategory.usage_category_id == uc.id,
+                        )
+                        .first()
+                    ) is not None
+                    if not link_exists:
+                        piece.usage_categories.append(uc)
+                        categories_count += 1
+                        dirty = True
+
+            # ------------------------------------------------------------------
+            # 5. KnowledgeNote upsert from knowledge/*.md
+            # ------------------------------------------------------------------
+            knowledge_dir = entry / "knowledge"
+            if knowledge_dir.exists():
+                for md_file in sorted(knowledge_dir.iterdir()):
+                    if not md_file.is_file() or md_file.suffix != ".md":
+                        continue
+
+                    stem = md_file.stem  # e.g. "historical_historia-utworu"
+
+                    # Parse category prefix from known enum values
+                    cat_val: Optional[str] = None
+                    for cv in _known_categories:
+                        if stem.startswith(cv + "_"):
+                            cat_val = cv
+                            break
+
+                    try:
+                        note_category = (
+                            KnowledgeCategory(cat_val) if cat_val else KnowledgeCategory.GENERAL
+                        )
+                    except ValueError:
+                        note_category = KnowledgeCategory.GENERAL
+
+                    # Parse "# Title\n\nbody" format written by write_knowledge()
+                    content = md_file.read_text(encoding="utf-8")
+                    if content.startswith("# "):
+                        first_nl = content.find("\n")
+                        if first_nl == -1:
+                            note_title: Optional[str] = content[2:].strip()
+                            body_md = ""
+                        else:
+                            note_title = content[2:first_nl].strip()
+                            body_md = content[first_nl + 1 :].lstrip("\n")
+                    else:
+                        note_title = None
+                        body_md = content
+
+                    existing_note = (
+                        db.query(KnowledgeNote)
+                        .filter(
+                            KnowledgeNote.music_piece_id == piece_id,
+                            KnowledgeNote.category == note_category,
+                            KnowledgeNote.title == note_title,
+                        )
+                        .first()
+                    )
+                    if existing_note is None:
+                        db.add(
+                            KnowledgeNote(
+                                music_piece_id=piece_id,
+                                category=note_category,
+                                title=note_title,
+                                body_md=body_md,
+                            )
+                        )
+                        knowledge_count += 1
+                        dirty = True
+                    elif existing_note.body_md != body_md:
+                        existing_note.body_md = body_md
+                        knowledge_count += 1
+                        dirty = True
+
             if dirty:
                 updated += 1
 
-        return {"scanned": scanned, "updated": updated}
+        return {
+            "scanned": scanned,
+            "updated": updated,
+            "sources": sources_count,
+            "translations": translations_count,
+            "categories": categories_count,
+            "knowledge": knowledge_count,
+        }

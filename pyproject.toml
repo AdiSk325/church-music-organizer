@@ -23,6 +23,7 @@ cairosvg = ">=2.7.0"
 alembic = ">=1.12.0"
 python-magic = ">=0.4.27"
 pyyaml = ">=6.0"
+nicegui = "^3.13.0"
 
 [tool.poetry.group.dev.dependencies]
 pytest = ">=7.4.0"

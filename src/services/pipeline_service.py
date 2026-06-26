@@ -32,7 +32,7 @@ from typing import Callable, Optional
 
 from sqlalchemy.orm import Session
 
-from src.database.models import FileType, MusicFile, MusicPiece, ProcessingStep
+from src.database.models import FileType, MusicFile, MusicFileKind, MusicPiece, ProcessingStep
 from src.llm.client import llm_available
 from src.llm.musicxml_validate import export_score_to_musicxml, load_musicxml_text
 from src.services.file_service import FileService
@@ -55,6 +55,13 @@ STEP_LABELS = {
     "underlay": "5. Podkład tekstu (LLM)",
 }
 STEP_SEQUENCE = ["ocr", "metadata", "clean_text", "omr", "analysis", "correct_score", "underlay"]
+
+# Map pipeline output prefix to semantic MusicFileKind so files land in the right
+# library sub-directory: CORRECTED/FINAL → scores/, anything else → derived/.
+_PREFIX_TO_KIND: dict = {
+    "corrected": MusicFileKind.CORRECTED,
+    "final": MusicFileKind.FINAL,
+}
 
 # Mapping ExtractedMetadata field -> MusicPiece attribute. Only EMPTY MusicPiece fields are
 # filled, so the AI never overwrites what the user typed in by hand.
@@ -145,8 +152,13 @@ class PipelineService:
         if ocr_res is None:
             detail = "OCR nie powiódł się."
             self._record_step(
-                db, piece_id=piece_id, key="ocr", status="error", detail=detail,
-                source_file_id=file_id, duration_ms=dur,
+                db,
+                piece_id=piece_id,
+                key="ocr",
+                status="error",
+                detail=detail,
+                source_file_id=file_id,
+                duration_ms=dur,
             )
             return {"status": "error", "detail": detail, "text": ""}
 
@@ -155,9 +167,14 @@ class PipelineService:
         has_notation = ocr_res.get("has_music_notation", False)
         detail = f"Pewność {conf}%, {len(text)} znaków."
         self._record_step(
-            db, piece_id=piece_id, key="ocr", status="ok", detail=detail,
+            db,
+            piece_id=piece_id,
+            key="ocr",
+            status="ok",
+            detail=detail,
             data={"confidence": conf, "chars": len(text), "has_music_notation": has_notation},
-            source_file_id=file_id, duration_ms=dur,
+            source_file_id=file_id,
+            duration_ms=dur,
         )
         return {
             "status": "ok",
@@ -177,23 +194,37 @@ class PipelineService:
         if not (omr_res and omr_res.get("success")):
             detail = (omr_res or {}).get("error", "Audiveris nie utworzył MusicXML.")
             self._record_step(
-                db, piece_id=piece_id, key="omr", status="error", detail=detail,
-                source_file_id=file_id, duration_ms=dur,
+                db,
+                piece_id=piece_id,
+                key="omr",
+                status="error",
+                detail=detail,
+                source_file_id=file_id,
+                duration_ms=dur,
             )
             return {"status": "error", "detail": detail}
 
         xml_path = omr_res.get("musicxml_path")
         out_fid = omr_res.get("output_file_id")
         self._record_step(
-            db, piece_id=piece_id, key="omr", status="ok", detail="MusicXML utworzony.",
-            source_file_id=file_id, output_file_id=out_fid, duration_ms=dur,
+            db,
+            piece_id=piece_id,
+            key="omr",
+            status="ok",
+            detail="MusicXML utworzony.",
+            source_file_id=file_id,
+            output_file_id=out_fid,
+            duration_ms=dur,
         )
 
         # Persist the full score analysis as its own step (data_json = ScoreDescriptor).
         analysis = omr_res.get("analysis")
         if analysis:
             self._record_step(
-                db, piece_id=piece_id, key="analysis", status="ok",
+                db,
+                piece_id=piece_id,
+                key="analysis",
+                status="ok",
                 detail=_analysis_detail(analysis),
                 report=analysis.get("narrative"),
                 data=analysis.get("descriptor_full") or analysis,
@@ -229,8 +260,12 @@ class PipelineService:
         if not raw_text or not raw_text.strip():
             result = {"status": "skipped", "detail": "Brak tekstu OCR do oczyszczenia."}
             self._record_step(
-                db, piece_id=piece_id, key="clean_text", status="skipped",
-                detail=result["detail"], source_file_id=source_file_id,
+                db,
+                piece_id=piece_id,
+                key="clean_text",
+                status="skipped",
+                detail=result["detail"],
+                source_file_id=source_file_id,
             )
             return result
 
@@ -242,8 +277,13 @@ class PipelineService:
         if piece is None:
             detail = f"Nie znaleziono utworu id={piece_id}."
             self._record_step(
-                db, piece_id=piece_id, key="clean_text", status="error", detail=detail,
-                source_file_id=source_file_id, duration_ms=dur,
+                db,
+                piece_id=piece_id,
+                key="clean_text",
+                status="error",
+                detail=detail,
+                source_file_id=source_file_id,
+                duration_ms=dur,
             )
             return {"status": "error", "detail": detail}
 
@@ -260,11 +300,15 @@ class PipelineService:
             "lyrics": cleaned.cleaned_lyrics,
         }
         self._record_step(
-            db, piece_id=piece_id, key="clean_text", status="ok",
+            db,
+            piece_id=piece_id,
+            key="clean_text",
+            status="ok",
             detail=f"Język: {cleaned.language}; {len(cleaned.cleaned_lyrics or '')} znaków.",
             report=cleaned.notes,
             data={"language": cleaned.language, "lyrics": cleaned.cleaned_lyrics},
-            source_file_id=source_file_id, duration_ms=dur,
+            source_file_id=source_file_id,
+            duration_ms=dur,
         )
         return result
 
@@ -287,7 +331,11 @@ class PipelineService:
         if not (ocr_text and ocr_text.strip()) and not score_metadata:
             detail = "Brak tekstu OCR do ekstrakcji metadanych."
             self._record_step(
-                db, piece_id=piece_id, key="metadata", status="skipped", detail=detail,
+                db,
+                piece_id=piece_id,
+                key="metadata",
+                status="skipped",
+                detail=detail,
                 source_file_id=source_file_id,
             )
             return {"status": "skipped", "detail": detail}
@@ -296,14 +344,17 @@ class PipelineService:
         meta = extract_metadata(ocr_text, score_metadata=score_metadata)
         dur = int((time.perf_counter() - t0) * 1000)
 
-        piece: Optional[MusicPiece] = (
-            db.query(MusicPiece).filter(MusicPiece.id == piece_id).first()
-        )
+        piece: Optional[MusicPiece] = db.query(MusicPiece).filter(MusicPiece.id == piece_id).first()
         if piece is None:
             detail = f"Nie znaleziono utworu id={piece_id}."
             self._record_step(
-                db, piece_id=piece_id, key="metadata", status="error", detail=detail,
-                source_file_id=source_file_id, duration_ms=dur,
+                db,
+                piece_id=piece_id,
+                key="metadata",
+                status="error",
+                detail=detail,
+                source_file_id=source_file_id,
+                duration_ms=dur,
             )
             return {"status": "error", "detail": detail}
 
@@ -319,14 +370,20 @@ class PipelineService:
         db.flush()
 
         detail = (
-            f"Uzupełniono pola: {', '.join(applied)}." if applied
+            f"Uzupełniono pola: {', '.join(applied)}."
+            if applied
             else "Nie znaleziono nowych metadanych do uzupełnienia."
         )
         self._record_step(
-            db, piece_id=piece_id, key="metadata", status="ok", detail=detail,
+            db,
+            piece_id=piece_id,
+            key="metadata",
+            status="ok",
+            detail=detail,
             report=(meta.notes or None),
             data={"extracted": extracted, "applied": applied},
-            source_file_id=source_file_id, duration_ms=dur,
+            source_file_id=source_file_id,
+            duration_ms=dur,
         )
         return {"status": "ok", "detail": detail, "extracted": extracted, "applied": applied}
 
@@ -347,7 +404,11 @@ class PipelineService:
             logger.exception("run_step4: nie udało się wczytać MusicXML %s", xml_path)
             detail = f"Nie wczytano MusicXML: {exc}"
             self._record_step(
-                db, piece_id=piece_id, key="correct_score", status="error", detail=detail,
+                db,
+                piece_id=piece_id,
+                key="correct_score",
+                status="error",
+                detail=detail,
                 source_file_id=source_file_id,
             )
             return {"status": "error", "detail": detail}
@@ -360,8 +421,14 @@ class PipelineService:
         if not result.changed:
             detail = "Brak zaakceptowanych zmian — zachowano oryginał OMR."
             self._record_step(
-                db, piece_id=piece_id, key="correct_score", status="ok", detail=detail,
-                report=result.report, source_file_id=source_file_id, duration_ms=dur,
+                db,
+                piece_id=piece_id,
+                key="correct_score",
+                status="ok",
+                detail=detail,
+                report=result.report,
+                source_file_id=source_file_id,
+                duration_ms=dur,
             )
             return {
                 "status": "ok",
@@ -382,8 +449,14 @@ class PipelineService:
         )
         detail = "Zapisano poprawiony plik MusicXML."
         self._record_step(
-            db, piece_id=piece_id, key="correct_score", status="ok", detail=detail,
-            report=result.report, source_file_id=source_file_id, output_file_id=record.id,
+            db,
+            piece_id=piece_id,
+            key="correct_score",
+            status="ok",
+            detail=detail,
+            report=result.report,
+            source_file_id=source_file_id,
+            output_file_id=record.id,
             duration_ms=dur,
         )
         return {
@@ -412,7 +485,11 @@ class PipelineService:
         if not lyrics or not lyrics.strip():
             detail = "Brak oczyszczonego tekstu do podłożenia."
             self._record_step(
-                db, piece_id=piece_id, key="underlay", status="skipped", detail=detail,
+                db,
+                piece_id=piece_id,
+                key="underlay",
+                status="skipped",
+                detail=detail,
                 source_file_id=source_file_id,
             )
             return {"status": "skipped", "detail": detail}
@@ -421,7 +498,11 @@ class PipelineService:
             if not xml_path:
                 detail = "Nie podano pliku MusicXML."
                 self._record_step(
-                    db, piece_id=piece_id, key="underlay", status="error", detail=detail,
+                    db,
+                    piece_id=piece_id,
+                    key="underlay",
+                    status="error",
+                    detail=detail,
                     source_file_id=source_file_id,
                 )
                 return {"status": "error", "detail": detail}
@@ -431,7 +512,11 @@ class PipelineService:
                 logger.exception("run_step5: nie udało się wczytać MusicXML %s", xml_path)
                 detail = f"Nie wczytano MusicXML: {exc}"
                 self._record_step(
-                    db, piece_id=piece_id, key="underlay", status="error", detail=detail,
+                    db,
+                    piece_id=piece_id,
+                    key="underlay",
+                    status="error",
+                    detail=detail,
                     source_file_id=source_file_id,
                 )
                 return {"status": "error", "detail": detail}
@@ -443,8 +528,14 @@ class PipelineService:
         if not result.changed:
             detail = "Nie utworzono finalnego pliku — zachowano plik z korekty."
             self._record_step(
-                db, piece_id=piece_id, key="underlay", status="ok", detail=detail,
-                report=result.report, source_file_id=source_file_id, duration_ms=dur,
+                db,
+                piece_id=piece_id,
+                key="underlay",
+                status="ok",
+                detail=detail,
+                report=result.report,
+                source_file_id=source_file_id,
+                duration_ms=dur,
             )
             return {
                 "status": "ok",
@@ -464,8 +555,14 @@ class PipelineService:
         )
         detail = "Zapisano finalny plik MusicXML z tekstem."
         self._record_step(
-            db, piece_id=piece_id, key="underlay", status="ok", detail=detail,
-            report=result.report, source_file_id=source_file_id, output_file_id=record.id,
+            db,
+            piece_id=piece_id,
+            key="underlay",
+            status="ok",
+            detail=detail,
+            report=result.report,
+            source_file_id=source_file_id,
+            output_file_id=record.id,
             duration_ms=dur,
         )
         return {
@@ -670,13 +767,33 @@ class PipelineService:
             )
             out_text = xml_text
 
+        kind = _PREFIX_TO_KIND.get(prefix, MusicFileKind.OMR_RAW)
         version = self._next_version(db, piece_id, prefix)
         filename = self._derived_name(source_path, prefix=prefix, version=version)
-        stored_path = FileService.save_uploaded_file(
-            piece_id=piece_id,
-            filename=filename,
-            file_data=out_text.encode("utf-8"),
-        )
+
+        # Route through LibraryService when the parent piece exists — this places the
+        # artefact under pieces/<id>_<slug>/scores/ or derived/ instead of data/uploads/.
+        piece: Optional[MusicPiece] = db.query(MusicPiece).filter(MusicPiece.id == piece_id).first()
+        if piece is not None:
+            stored_path = FileService.save_uploaded_file(
+                piece_id=piece_id,
+                filename=filename,
+                file_data=out_text.encode("utf-8"),
+                use_library=True,
+                piece=piece,
+                kind=kind,
+            )
+        else:
+            # Fallback: piece disappeared between steps (should not happen in normal flow).
+            logger.warning(
+                "pipeline: piece_id=%s not found — falling back to legacy upload path", piece_id
+            )
+            stored_path = FileService.save_uploaded_file(
+                piece_id=piece_id,
+                filename=filename,
+                file_data=out_text.encode("utf-8"),
+            )
+
         path = Path(stored_path)
         record = MusicFile(
             music_piece_id=piece_id,
@@ -688,10 +805,13 @@ class PipelineService:
             description=description,
             is_processed=1,
             version=version,
+            kind=kind,
         )
         db.add(record)
         db.flush()  # populate record.id
-        logger.info("pipeline: zapisano %s (wersja %s) jako file_id=%s", path.name, version, record.id)
+        logger.info(
+            "pipeline: zapisano %s (wersja %s) jako file_id=%s", path.name, version, record.id
+        )
         return record
 
     @staticmethod
@@ -718,7 +838,7 @@ class PipelineService:
         # Strip any earlier pipeline prefix from the stem so names don't accrete (corrected_…).
         for known in ("corrected_", "final_"):
             if stem.startswith(known):
-                stem = stem[len(known):]
+                stem = stem[len(known) :]
         stamp = datetime.utcnow().strftime("%Y%m%d-%H%M")
         return f"{prefix}_v{version}_{stamp}_{stem}.musicxml"
 

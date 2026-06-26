@@ -28,11 +28,12 @@ COPY . .
 # Create data directories
 RUN mkdir -p data/uploads data/processed
 
-# Expose Streamlit port
-EXPOSE 8501
+# Expose NiceGUI port
+EXPOSE 8080
 
 # Health check
-HEALTHCHECK CMD curl --fail http://localhost:8501/_stcore/health || exit 1
+HEALTHCHECK CMD curl --fail http://localhost:8080/ || exit 1
 
-# Run the application
-CMD ["streamlit", "run", "src/app/main.py", "--server.address", "0.0.0.0"]
+# Run the application (NiceGUI binds to 0.0.0.0 in container mode)
+ENV CMO_NG_HOST=0.0.0.0
+CMD ["python", "-m", "src.app_ng.main"]

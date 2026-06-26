@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Optional
 
 from sqlalchemy import Boolean, Column, DateTime, Enum, ForeignKey, Integer, String, Text
-from sqlalchemy.orm import declarative_base, relationship
+from sqlalchemy.orm import declarative_base, object_session, relationship
 
 Base = declarative_base()
 
@@ -149,18 +149,52 @@ class MusicPiece(Base):
         1. The Translation row with language='pl' and is_primary=True.
         2. The newest Translation row with language='pl' (by created_at descending).
         3. The legacy lyrics_translation_pl column value.
-        """
-        primary = next((t for t in self.translations if t.language == "pl" and t.is_primary), None)
-        if primary is not None:
-            return primary.text
 
-        pl_list = sorted(
-            [t for t in self.translations if t.language == "pl"],
-            key=lambda t: t.created_at or datetime.min,
-            reverse=True,
-        )
-        if pl_list:
-            return pl_list[0].text
+        When the instance is attached to a live session the property issues fresh SQL queries
+        so that rows added/modified after the last ``refresh`` (e.g. immediately after a
+        ``flush``) are always visible — avoiding stale-collection bugs (WAŻNE-2).
+        """
+        sess = object_session(self)
+        if sess is not None and self.id is not None:
+            # Fresh queries bypass any cached translations collection on the ORM instance.
+            primary = (
+                sess.query(Translation)
+                .filter(
+                    Translation.music_piece_id == self.id,
+                    Translation.language == "pl",
+                    Translation.is_primary.is_(True),
+                )
+                .first()
+            )
+            if primary is not None:
+                return primary.text
+
+            newest = (
+                sess.query(Translation)
+                .filter(
+                    Translation.music_piece_id == self.id,
+                    Translation.language == "pl",
+                )
+                .order_by(Translation.created_at.desc())
+                .first()
+            )
+            if newest is not None:
+                return newest.text
+        else:
+            # Detached instance — use the already-loaded in-memory collection.
+            primary = next(
+                (t for t in self.translations if t.language == "pl" and t.is_primary), None
+            )
+            if primary is not None:
+                return primary.text
+
+            pl_list = sorted(
+                [t for t in self.translations if t.language == "pl"],
+                key=lambda t: t.created_at or datetime.min,
+                reverse=True,
+            )
+            if pl_list:
+                return pl_list[0].text
 
         return self.lyrics_translation_pl  # legacy column — fallback
 
