@@ -19,9 +19,13 @@ poetry shell
 ## Commands
 
 ```bash
-# Run the application
-poetry run streamlit run src/app/main.py   # starts at http://localhost:8501
+# Run the application (NiceGUI — desktop-first UI)
+poetry run python -m src.app_ng.main       # starts at http://localhost:8080
+CMO_NG_NATIVE=1 poetry run python -m src.app_ng.main   # native window (needs pywebview)
 ./run.sh                                   # convenience wrapper for the above
+
+# Legacy Streamlit UI (archived reference, not the active app)
+poetry run streamlit run src/app/_legacy/main.py
 
 # Tests
 poetry run pytest                    # all tests; -v --tb=short configured in pyproject.toml
@@ -73,8 +77,21 @@ Gemini-powered agents. Runnable as a cascade (`PipelineService.run_full`) or ste
 - **Auth**: default `genai.Client()` is zero-config — it reads `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) from the environment. No key in code. `.env` is loaded by `client.py` on import.
 - **Config (.env)**: `GEMINI_API_KEY` (required), `CMO_LLM_MODEL` (default `gemini-2.5-flash`), and per-step overrides `CMO_LLM_MODEL_TEXT` / `CMO_LLM_MODEL_SCORE` / `CMO_LLM_MODEL_LYRICS`.
 
-### UI layer (`src/app/main.py`)
-Single 560-line Streamlit file. Navigation is driven by `st.session_state` with two top-level views: collection list and individual song detail. The app calls `init_db()` on every cold start and interacts with the database through direct SQLAlchemy sessions (not via a service layer). File uploads are saved to `data/uploads/`; OCR outputs go to `data/processed/`.
+### UI layer (`src/app_ng/` — NiceGUI, desktop-first)
+NiceGUI app split into four tabs, replacing the legacy Streamlit monolith:
+- `main.py`: entry point (`python -m src.app_ng.main`), header + `ui.tabs`/`ui.tab_panels`, calls `init_db()` on cold start. Env: `CMO_NG_PORT` (8080), `CMO_NG_HOST` (127.0.0.1; `0.0.0.0` in Docker), `CMO_NG_NATIVE` (native window via pywebview).
+- `shared.py`: cross-tab `AppState` singleton (`state`) — `selected_piece_id`, `tabs`/`tab_refs` for programmatic tab switching, `on_navigate` refresh callbacks; ported domain helpers (`get_file_type`, `resolve_xml_kind`, `is_reference_file`, liturgical vocab).
+- `pages/library.py`: **Biblioteka** — search/filter/paginate via `MusicPieceService.list_pieces`, add form with upload, delete.
+- `pages/detail.py`: **Przegląd** — metadata, analysis panel, PDF/scan preview (base64 iframe/`ui.image`), freshest-MusicXML downloads (`ui.download.file`), MuseScore, usage history + add.
+- `pages/processing.py`: **Przetwarzanie** — engine badges, persisted status panel, source upload, full pipeline (1→5) and per-step buttons, reference comparison + metrics table.
+- `pages/edit.py`: **Edycja** — full metadata edit + tags, side-by-side lyrics/translation editor, Gemini translation, standalone step-5 underlay.
+
+**Patterns to follow when extending the UI:**
+- Each tab is a `@ui.refreshable` `_panel()` registered in `state.on_navigate[name]` so cross-tab navigation/saves can refresh it (`state.open_piece(id, tab)` switches tabs + refreshes).
+- Materialise all ORM data into plain dicts inside a `_collect()` call within the `get_db_session()` block — never touch lazy relationships after the session closes (DetachedInstanceError).
+- Long-blocking engine/LLM work runs via `await run.io_bound(fn, …)`; the wrapper opens its **own** session inside the worker thread. Never call `ui.*` from the worker — the full-pipeline progress bar polls a shared `_run_state` dict via `ui.timer`.
+
+The legacy 1768-line Streamlit app is archived at **`src/app/_legacy/main.py`** as a reference (still runnable via `streamlit run src/app/_legacy/main.py`). File uploads are saved to `data/uploads/`; OCR outputs go to `data/processed/`. Pieces are read/written through the service layer (`MusicPieceService`, `FileService`).
 
 ## Agent system (`.claude/agents/`)
 
@@ -92,9 +109,36 @@ This project uses specialized Claude Code subagents. Invoke them by name when th
 
 Start a conversation with `product-owner` for strategic work and feature planning. Each agent's definition contains full project context so it can operate independently.
 
+## Database migrations
+
+**Alembic** (configured in `alembic.ini` with `render_as_batch=True` for SQLite) is the canonical
+tool for schema changes. Run `poetry run alembic upgrade head` to apply all migrations.
+
+The legacy `init_db()` in `src/database/database.py` (which uses `Base.metadata.create_all`)
+is retained for rapid test setup and first-time startup — it quickly creates all tables without
+running migration files. Use Alembic for **any new schema changes** going forward; `init_db()` is
+not modified by new migrations.
+
+Example workflow:
+```bash
+# After modifying src/database/models.py, generate a migration:
+poetry run alembic revision --autogenerate -m "your_description"
+
+# Apply it to development/production database:
+poetry run alembic upgrade head
+
+# Rollback one migration if needed:
+poetry run alembic downgrade -1
+```
+
 ## Key conventions
 
 - **File types** are controlled by the `FileType` enum in `models.py` (`SCAN`, `PDF`, `MUSESCORE`, `XML`, `TEXT`, `OTHER`). File type detection in the UI uses `python-magic` (requires system `libmagic`).
+- **Semantic file kinds** (`MusicFile.kind`) replace brittle filename prefixes — use enums like
+  `SOURCE_SCAN`, `OMR_RAW`, `CORRECTED`, `FINAL`, `EDITABLE` for categorization.
+- **Library root** (`CMO_LIBRARY_ROOT`, default `../church-music-library`) is the filesystem
+  source of truth for piece storage (metadata, scores, texts, knowledge). SQLite (`church_music.db`)
+  is a fast index. See plan in `docs/ROADMAP.md` and task #2 in the devops roadmap.
 - **Cascade deletes** are set on `MusicPiece` → `files` and `usage_history`. Deleting a piece removes all its files and history. Tags are not cascaded (shared across pieces).
 - **Line length**: 100 characters (Black/isort configured in `pyproject.toml`).
 - **Python target**: 3.8+ syntax.

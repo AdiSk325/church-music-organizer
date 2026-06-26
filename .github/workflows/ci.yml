@@ -94,13 +94,15 @@ jobs:
             ${{ runner.os }}-pip-
 
       - name: Install Python dependencies
-        run: pip install -q streamlit
+        run: pip install -q nicegui streamlit
 
-      - name: Streamlit import check
-        run: python -c "import streamlit; print('Streamlit OK')"
+      - name: NiceGUI import check
+        run: python -c "import nicegui; print('NiceGUI', nicegui.__version__)"
 
-      - name: Verify src/app/main.py syntax
-        run: python -m py_compile src/app/main.py
+      - name: Verify NiceGUI app syntax
+        run: |
+          python -m compileall -q src/app_ng
+          python -m py_compile src/app/_legacy/main.py
 
   test-functional:
     name: Test Functional (OCR Pipeline)

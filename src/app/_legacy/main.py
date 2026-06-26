@@ -10,12 +10,21 @@ from pathlib import Path
 
 import streamlit as st
 
-# Add project root to path
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+# Add project root to path (this file lives in src/app/_legacy/, so go up four levels)
+sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 
 from sqlalchemy import func  # noqa: F401 — kept for future use
 
-from src.database import FileType, MusicFile, MusicPiece, Tag, UsageHistory, get_db_session, init_db
+from src.database import (
+    FileType,
+    MusicFile,
+    MusicFileKind,
+    MusicPiece,
+    Tag,
+    UsageHistory,
+    get_db_session,
+    init_db,
+)
 from src.services import (
     FileService,
     OCRService,
@@ -152,6 +161,55 @@ def attach_files(db, piece_id: int, uploaded_files, description: str = "") -> li
 UPLOAD_TYPES = ["pdf", "png", "jpg", "jpeg", "tiff", "bmp", "mscz", "mscx", "xml", "musicxml"]
 # File types that OCR / OMR can process
 OCR_TYPES = {FileType.SCAN, FileType.PDF}
+
+
+# ---------------------------------------------------------------------------
+# MusicFileKind helpers — kind-first, filename-prefix as fallback (kind=None)
+# These are needed because MusicFile.kind may be None for records that pre-date
+# task #1 and have not yet been migrated by scripts/migrate_to_library.py.
+# ---------------------------------------------------------------------------
+
+_KIND_DISPLAY: dict = {
+    MusicFileKind.FINAL: "🎶 Finalny (z tekstem)",
+    MusicFileKind.CORRECTED: "🛠️ Korekta partytury",
+    MusicFileKind.OMR_RAW: "📄 OMR (surowy)",
+    MusicFileKind.SOURCE_SCAN: "📄 OMR (surowy)",
+    MusicFileKind.SOURCE_PDF: "📄 OMR (surowy)",
+    MusicFileKind.EDITABLE: "📄 OMR (surowy)",
+    MusicFileKind.OTHER: "📄 OMR (surowy)",
+    MusicFileKind.REFERENCE: "📄 OMR (surowy)",  # reference files are filtered before display
+}
+
+
+def _resolve_xml_kind(f) -> str:
+    """Return the display-kind label for an XML MusicFile.
+
+    Resolution order:
+    1. MusicFile.kind (not None) — database-authoritative semantic kind.
+    2. Filename-prefix heuristic — legacy fallback for unmigrated records (kind=None).
+    Visual output is identical to the old heuristic so there is no UI regression.
+    """
+    if f.kind is not None:
+        return _KIND_DISPLAY.get(f.kind, "📄 OMR (surowy)")
+    # Fallback: brittle prefix convention (still needed while kind=None exists in DB)
+    name = (f.original_filename or "").lower()
+    if name.startswith("final_"):
+        return "🎶 Finalny (z tekstem)"
+    if name.startswith("corrected_"):
+        return "🛠️ Korekta partytury"
+    return "📄 OMR (surowy)"
+
+
+def _is_reference_file(f) -> bool:
+    """Return True when a MusicFile is a reference / ground-truth score.
+
+    Resolution order:
+    1. MusicFile.kind == REFERENCE — database-authoritative.
+    2. description.startswith('[REFERENCJA]') — legacy heuristic for kind=None records.
+    """
+    if f.kind is not None:
+        return f.kind == MusicFileKind.REFERENCE
+    return (f.description or "").startswith("[REFERENCJA]")
 
 
 # ---------------------------------------------------------------------------
@@ -763,11 +821,10 @@ elif page == "Song Details":
                             # Pobierz historyczne średnie czasy kroków do wyznaczenia ETA.
                             _hist_avgs: dict = {}
                             for _sk in _PIPELINE_STEP_KEYS:
-                                _skh = ProcessingStepService.history(
-                                    db, selected_piece_id, _sk
-                                )
+                                _skh = ProcessingStepService.history(db, selected_piece_id, _sk)
                                 _durs = [
-                                    s.duration_ms for s in _skh
+                                    s.duration_ms
+                                    for s in _skh
                                     if s.duration_ms is not None and s.duration_ms > 0
                                 ]
                                 if _durs:
@@ -1002,9 +1059,9 @@ elif page == "Song Details":
                 # Generated MusicXML — show ONLY the freshest version of each kind (OMR / korekta
                 # / finalny), so the user sees the current artefacts, not the whole history.
                 xml_files = [
-                    f for f in piece.files
-                    if f.file_type == FileType.XML
-                    and not (f.description or "").startswith("[REFERENCJA]")
+                    f
+                    for f in piece.files
+                    if f.file_type == FileType.XML and not _is_reference_file(f)
                 ]
                 if xml_files:
                     st.write("**Aktualne pliki MusicXML (najnowsze wersje):**")
@@ -1016,15 +1073,15 @@ elif page == "Song Details":
                     }
 
                     # Stable display order of the kinds (OMR → korekta → finalny).
-                    _KIND_ORDER = ["📄 OMR (surowy)", "🛠️ Korekta partytury", "🎶 Finalny (z tekstem)"]
+                    _KIND_ORDER = [
+                        "📄 OMR (surowy)",
+                        "🛠️ Korekta partytury",
+                        "🎶 Finalny (z tekstem)",
+                    ]
 
                     def _file_kind(f) -> str:
-                        name = (f.original_filename or "").lower()
-                        if name.startswith("final_"):
-                            return "🎶 Finalny (z tekstem)"
-                        if name.startswith("corrected_"):
-                            return "🛠️ Korekta partytury"
-                        return "📄 OMR (surowy)"
+                        # kind-first; filename-prefix heuristic as fallback for kind=None records
+                        return _resolve_xml_kind(f)
 
                     # Keep only the newest file per kind.
                     _newest_per_kind: dict = {}
@@ -1089,10 +1146,9 @@ elif page == "Song Details":
                 # --- LYRICS ---
                 st.subheader("📜 Tekst pieśni")
                 _clean_step = latest_steps.get("clean_text")
-                _detected_lang = (
-                    (ProcessingStepService.data(_clean_step) or {}).get("language")
-                    or piece.language
-                )
+                _detected_lang = (ProcessingStepService.data(_clean_step) or {}).get(
+                    "language"
+                ) or piece.language
                 # Uwagi tłumacza z poprzedniego uruchomienia (zapisane przez flash).
                 _transl_notes = st.session_state.pop("translation_notes", None)
                 if _transl_notes:
@@ -1114,7 +1170,7 @@ elif page == "Song Details":
                         st.markdown("**Tłumaczenie (PL)** (edytowalne)")
                         _edit_transl = st.text_area(
                             "tekst_transl",
-                            value=piece.lyrics_translation_pl or "",
+                            value=piece.primary_translation_pl or "",
                             height=220,
                             label_visibility="collapsed",
                             key=f"transl_{selected_piece_id}",
@@ -1122,11 +1178,7 @@ elif page == "Song Details":
                     if st.form_submit_button("💾 Zapisz teksty"):
                         try:
                             with get_db_session() as db2:
-                                _p2 = (
-                                    db2.query(MusicPiece)
-                                    .filter_by(id=selected_piece_id)
-                                    .first()
-                                )
+                                _p2 = db2.query(MusicPiece).filter_by(id=selected_piece_id).first()
                                 if _p2:
                                     _p2.lyrics = _edit_orig.strip() or None
                                     _p2.lyrics_translation_pl = _edit_transl.strip() or None
@@ -1142,29 +1194,45 @@ elif page == "Song Details":
                             st.error(f"Błąd zapisu tekstów: {str(_exc)}")
 
                 # Underlay the (possibly edited) lyrics onto the latest corrected / OMR score.
-                _under_src = next(
-                    (
-                        f for f in sorted(piece.files, key=lambda x: x.id, reverse=True)
-                        if f.file_type == FileType.XML
-                        and (f.original_filename or "").lower().startswith("corrected_")
-                    ),
-                    None,
-                ) or next(
-                    (
-                        f for f in sorted(piece.files, key=lambda x: x.id, reverse=True)
-                        if f.file_type == FileType.XML
-                        and not (f.description or "").startswith("[REFERENCJA]")
-                        and not (f.original_filename or "").lower().startswith("final_")
-                    ),
-                    None,
+                # Priority 1: kind-authoritative CORRECTED file (step-4 output).
+                # Priority 2: filename-prefix heuristic (unmigrated records with kind=None).
+                # Priority 3: any non-reference, non-final XML file.
+                _xml_for_underlay = sorted(
+                    (f for f in piece.files if f.file_type == FileType.XML),
+                    key=lambda x: x.id,
+                    reverse=True,
                 )
+                _under_src = next(
+                    (f for f in _xml_for_underlay if f.kind == MusicFileKind.CORRECTED), None
+                )
+                if _under_src is None:
+                    _under_src = next(
+                        (
+                            f
+                            for f in _xml_for_underlay
+                            if (f.original_filename or "").lower().startswith("corrected_")
+                        ),
+                        None,
+                    )
+                if _under_src is None:
+                    _under_src = next(
+                        (
+                            f
+                            for f in _xml_for_underlay
+                            if not _is_reference_file(f)
+                            and f.kind != MusicFileKind.FINAL
+                            and not (f.original_filename or "").lower().startswith("final_")
+                        ),
+                        None,
+                    )
                 _can_underlay = bool((piece.lyrics or "").strip()) and _under_src is not None
                 if st.button(
                     "🎶 Podłóż tekst do nut (krok 5)",
                     key=f"underlay_only_{selected_piece_id}",
                     disabled=not _can_underlay,
                     help=(
-                        None if _can_underlay
+                        None
+                        if _can_underlay
                         else "Wymagany tekst pieśni oraz partytura MusicXML (uruchom OMR/korektę)."
                     ),
                 ):
@@ -1190,7 +1258,7 @@ elif page == "Song Details":
 
                 _btn_transl_lbl = (
                     "🔁 Przetłumacz ponownie"
-                    if piece.lyrics_translation_pl
+                    if piece.primary_translation_pl
                     else "🌐 Przetłumacz na polski (Gemini)"
                 )
                 _can_translate = bool(piece.lyrics) and _llm_avail
@@ -1199,22 +1267,14 @@ elif page == "Song Details":
                     key=f"translate_{selected_piece_id}",
                     disabled=not _can_translate,
                     help=(
-                        None
-                        if _can_translate
-                        else "Wymagany tekst pieśni i dostępny Gemini LLM."
+                        None if _can_translate else "Wymagany tekst pieśni i dostępny Gemini LLM."
                     ),
                 ):
                     with st.spinner("Tłumaczenie przez Gemini…"):
                         try:
-                            _tr = translate_to_polish(
-                                piece.lyrics, source_language=_detected_lang
-                            )
+                            _tr = translate_to_polish(piece.lyrics, source_language=_detected_lang)
                             with get_db_session() as db2:
-                                _p2 = (
-                                    db2.query(MusicPiece)
-                                    .filter_by(id=selected_piece_id)
-                                    .first()
-                                )
+                                _p2 = db2.query(MusicPiece).filter_by(id=selected_piece_id).first()
                                 if _p2:
                                     _p2.lyrics_translation_pl = _tr.translation_pl
                                     db2.commit()
@@ -1231,9 +1291,7 @@ elif page == "Song Details":
 
                 if _clean_step and _clean_step.report:
                     with st.expander("🧹 Raport czyszczenia tekstu (LLM)"):
-                        st.caption(
-                            f"Status: {_clean_step.status} · {_clean_step.detail or ''}"
-                        )
+                        st.caption(f"Status: {_clean_step.status} · {_clean_step.detail or ''}")
                         st.markdown(_clean_step.report)
 
                 st.markdown("---")
@@ -1244,14 +1302,8 @@ elif page == "Song Details":
                     [f for f in piece.files if f.file_type == FileType.XML],
                     key=lambda f: f.id,
                 )
-                _ref_files_cmp = [
-                    f for f in _xml_all_sorted
-                    if (f.description or "").startswith("[REFERENCJA]")
-                ]
-                _cand_files_cmp = [
-                    f for f in _xml_all_sorted
-                    if not (f.description or "").startswith("[REFERENCJA]")
-                ]
+                _ref_files_cmp = [f for f in _xml_all_sorted if _is_reference_file(f)]
+                _cand_files_cmp = [f for f in _xml_all_sorted if not _is_reference_file(f)]
 
                 with st.expander("📂 Wgraj plik referencyjny (target MusicXML)", expanded=False):
                     _ref_upload = st.file_uploader(
@@ -1283,9 +1335,7 @@ elif page == "Song Details":
                                 db2.commit()
                             st.session_state["processing_flash"] = {
                                 "piece_id": selected_piece_id,
-                                "message": (
-                                    f"✅ Plik referencyjny '{_ref_upload.name}' zapisany."
-                                ),
+                                "message": (f"✅ Plik referencyjny '{_ref_upload.name}' zapisany."),
                             }
                             st.rerun()
                         except Exception as _exc:
@@ -1301,7 +1351,8 @@ elif page == "Song Details":
                     _pref_kw = ("krok 5", "krok 4", "final", "corrected")
                     _def_cand = next(
                         (
-                            f for f in reversed(_cand_files_cmp)
+                            f
+                            for f in reversed(_cand_files_cmp)
                             if any(kw in (f.description or "").lower() for kw in _pref_kw)
                         ),
                         _cand_files_cmp[-1] if _cand_files_cmp else None,
@@ -1320,7 +1371,8 @@ elif page == "Song Details":
                         0,
                         next(
                             (
-                                i for i, k in enumerate(_cand_keys)
+                                i
+                                for i, k in enumerate(_cand_keys)
                                 if _def_cand and _cand_dict[k].id == _def_cand.id
                             ),
                             len(_cand_keys) - 1,
@@ -1370,21 +1422,11 @@ elif page == "Song Details":
                                 _recall = _cmp_res["note_recall"]
                                 _ratio = _cmp_res["note_ratio"]
                                 _recall_icon = (
-                                    _ok
-                                    if _recall >= 0.9
-                                    else ("⚠️" if _recall >= 0.7 else _nok)
+                                    _ok if _recall >= 0.9 else ("⚠️" if _recall >= 0.7 else _nok)
                                 )
                                 _ratio_icon = _ok if 0.9 <= _ratio <= 1.1 else _nok
-                                _r_fifths = (
-                                    str(_r["fifths"])
-                                    if _r["fifths"] is not None
-                                    else "—"
-                                )
-                                _c_fifths = (
-                                    str(_c2["fifths"])
-                                    if _c2["fifths"] is not None
-                                    else "—"
-                                )
+                                _r_fifths = str(_r["fifths"]) if _r["fifths"] is not None else "—"
+                                _c_fifths = str(_c2["fifths"]) if _c2["fifths"] is not None else "—"
                                 _rows = [
                                     {
                                         "Metryka": "Poprawny MusicXML",
@@ -1392,16 +1434,12 @@ elif page == "Song Details":
                                         "Kandydat": (
                                             "tak" if _cmp_res["valid_musicxml"] else "NIE"
                                         ),
-                                        "Wynik": (
-                                            _ok if _cmp_res["valid_musicxml"] else _nok
-                                        ),
+                                        "Wynik": (_ok if _cmp_res["valid_musicxml"] else _nok),
                                     },
                                     {
                                         "Metryka": "Format .mxl",
                                         "Referencja": "—",
-                                        "Kandydat": (
-                                            ".mxl" if _cmp_res["is_mxl"] else ".xml"
-                                        ),
+                                        "Kandydat": (".mxl" if _cmp_res["is_mxl"] else ".xml"),
                                         "Wynik": "—",
                                     },
                                     {

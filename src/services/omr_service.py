@@ -7,7 +7,7 @@ from typing import Optional
 from sqlalchemy.orm import Session
 
 from src.analysis.score_descriptor import ScoreDescriptor
-from src.database.models import FileType, MusicFile, MusicPiece
+from src.database.models import FileType, MusicFile, MusicFileKind, MusicPiece
 from src.ocr.pdf_to_musicxml import PdfToMusicXml, audiveris_available
 
 logger = logging.getLogger(__name__)
@@ -161,12 +161,26 @@ class OMRService:
 
         piece_id = music_file.music_piece_id
         tmp_xml = Path(musicxml_path)
+
+        # Route the OMR artefact into the piece's library folder (derived/) when possible.
+        # Fall back to the legacy upload directory if the piece cannot be located.
+        piece: Optional[MusicPiece] = db.query(MusicPiece).filter(MusicPiece.id == piece_id).first()
         try:
-            stored_path = FileService.save_uploaded_file(
-                piece_id=piece_id,
-                filename=tmp_xml.name,
-                file_data=tmp_xml.read_bytes(),
-            )
+            if piece is not None:
+                stored_path = FileService.save_uploaded_file(
+                    piece_id=piece_id,
+                    filename=tmp_xml.name,
+                    file_data=tmp_xml.read_bytes(),
+                    use_library=True,
+                    piece=piece,
+                    kind=MusicFileKind.OMR_RAW,
+                )
+            else:
+                stored_path = FileService.save_uploaded_file(
+                    piece_id=piece_id,
+                    filename=tmp_xml.name,
+                    file_data=tmp_xml.read_bytes(),
+                )
             if Path(stored_path).resolve() != tmp_xml.resolve() and tmp_xml.exists():
                 tmp_xml.unlink()  # drop the scratch copy after relocating
         except Exception:
@@ -185,6 +199,7 @@ class OMRService:
             mime_type="application/vnd.recordare.musicxml+xml",
             description="OMR output (Audiveris) — auto-analysed",
             is_processed=1,
+            kind=MusicFileKind.OMR_RAW,
         )
         db.add(output_record)
         db.flush()  # populate output_record.id before returning

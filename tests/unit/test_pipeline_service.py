@@ -50,9 +50,14 @@ def pdf_file(db_session, piece, tmp_path):
 
 @pytest.fixture
 def stub_save(monkeypatch, tmp_path):
-    """Redirect FileService.save_uploaded_file to a temp dir (real bytes on disk)."""
+    """Redirect FileService.save_uploaded_file to a temp dir (real bytes on disk).
 
-    def _save(piece_id, filename, file_data, upload_dir="data/uploads"):
+    Accepts **kwargs so the stub stays compatible when callers pass
+    ``use_library=True``, ``piece=...``, ``kind=...`` keywords introduced by the
+    library-routing feature.
+    """
+
+    def _save(piece_id, filename, file_data, upload_dir="data/uploads", **kwargs):
         dest = tmp_path / f"saved_{piece_id}_{filename}"
         dest.write_bytes(file_data)
         return str(dest)

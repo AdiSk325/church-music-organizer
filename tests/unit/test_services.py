@@ -7,7 +7,7 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from src.database.models import Base, FileType, MusicFile, MusicPiece
+from src.database.models import Base, FileType, MusicFile, MusicPiece, Translation, TranslationKind
 from src.services import FileService, MusicPieceService
 
 
@@ -269,6 +269,186 @@ class TestFileServiceSaveUploadedFile:
         # Spaces and special chars replaced, extension preserved
         assert " " not in saved.name
         assert saved.exists()
+
+
+class TestSetPrimaryTranslationPl:
+    """Tests for MusicPieceService.set_primary_translation_pl."""
+
+    def _make_piece(self, db_session) -> MusicPiece:
+        piece = MusicPieceService.create_piece(db_session, title="Test Piece")
+        db_session.commit()
+        return piece
+
+    def _primary_pl_rows(self, db_session, piece_id: int):
+        return (
+            db_session.query(Translation)
+            .filter(
+                Translation.music_piece_id == piece_id,
+                Translation.language == "pl",
+                Translation.is_primary.is_(True),
+            )
+            .all()
+        )
+
+    # ------------------------------------------------------------------
+    # Basic write: both storage locations updated
+    # ------------------------------------------------------------------
+
+    def test_sets_legacy_column_and_translation_row(self, db_session):
+        piece = self._make_piece(db_session)
+        result = MusicPieceService.set_primary_translation_pl(db_session, piece.id, "Tekst PL")
+        db_session.commit()
+
+        assert result is not None
+        assert result.lyrics_translation_pl == "Tekst PL"
+        assert result.primary_translation_pl == "Tekst PL"
+
+        primaries = self._primary_pl_rows(db_session, piece.id)
+        assert len(primaries) == 1
+        assert primaries[0].text == "Tekst PL"
+
+    def test_translation_row_has_literal_kind(self, db_session):
+        piece = self._make_piece(db_session)
+        MusicPieceService.set_primary_translation_pl(db_session, piece.id, "PL text")
+        db_session.commit()
+
+        primaries = self._primary_pl_rows(db_session, piece.id)
+        assert primaries[0].kind == TranslationKind.LITERAL
+
+    # ------------------------------------------------------------------
+    # Idempotent update: no duplicate rows
+    # ------------------------------------------------------------------
+
+    def test_second_call_updates_same_row_no_duplicate(self, db_session):
+        piece = self._make_piece(db_session)
+        MusicPieceService.set_primary_translation_pl(db_session, piece.id, "Pierwsze")
+        db_session.commit()
+
+        MusicPieceService.set_primary_translation_pl(db_session, piece.id, "Drugie")
+        db_session.commit()
+
+        primaries = self._primary_pl_rows(db_session, piece.id)
+        assert len(primaries) == 1
+        assert primaries[0].text == "Drugie"
+
+        pl_total = (
+            db_session.query(Translation)
+            .filter(
+                Translation.music_piece_id == piece.id,
+                Translation.language == "pl",
+            )
+            .count()
+        )
+        assert pl_total == 1  # still just the one row
+
+    # ------------------------------------------------------------------
+    # Clear: empty / None cleans up
+    # ------------------------------------------------------------------
+
+    def test_empty_string_clears_legacy_column_and_removes_primary_row(self, db_session):
+        piece = self._make_piece(db_session)
+        MusicPieceService.set_primary_translation_pl(db_session, piece.id, "Will be cleared")
+        db_session.commit()
+
+        MusicPieceService.set_primary_translation_pl(db_session, piece.id, "")
+        db_session.commit()
+
+        db_session.refresh(piece)
+        assert piece.lyrics_translation_pl is None
+        assert piece.primary_translation_pl is None  # legacy fallback also None
+        assert len(self._primary_pl_rows(db_session, piece.id)) == 0
+
+    def test_none_clears_same_as_empty_string(self, db_session):
+        piece = self._make_piece(db_session)
+        MusicPieceService.set_primary_translation_pl(db_session, piece.id, "Some text")
+        db_session.commit()
+
+        MusicPieceService.set_primary_translation_pl(db_session, piece.id, None)
+        db_session.commit()
+
+        db_session.refresh(piece)
+        assert piece.lyrics_translation_pl is None
+        assert len(self._primary_pl_rows(db_session, piece.id)) == 0
+
+    # ------------------------------------------------------------------
+    # Nonexistent piece returns None
+    # ------------------------------------------------------------------
+
+    def test_nonexistent_piece_returns_none(self, db_session):
+        result = MusicPieceService.set_primary_translation_pl(db_session, 99999, "text")
+        assert result is None
+
+    # ------------------------------------------------------------------
+    # Regression: existing Translation(pl, primary) is updated, not shadowed
+    # ------------------------------------------------------------------
+
+    def test_existing_primary_row_is_updated_not_shadowed(self, db_session):
+        """Core regression scenario: piece already has a Translation(pl, primary=True).
+
+        After set_primary_translation_pl the property must return the NEW text,
+        not the old one from the stale Translation row.
+        """
+        piece = self._make_piece(db_session)
+
+        # Simulate pre-existing Translation row (as if seeded by migration)
+        old_row = Translation(
+            music_piece_id=piece.id,
+            language="pl",
+            is_primary=True,
+            kind=TranslationKind.LITERAL,
+            text="Stary tekst",
+        )
+        db_session.add(old_row)
+        db_session.commit()
+
+        # Sanity: property reads the old row
+        db_session.refresh(piece)
+        assert piece.primary_translation_pl == "Stary tekst"
+
+        # Now update via the service
+        MusicPieceService.set_primary_translation_pl(db_session, piece.id, "Nowy tekst")
+        db_session.commit()
+        db_session.refresh(piece)
+
+        assert piece.primary_translation_pl == "Nowy tekst"
+        assert piece.lyrics_translation_pl == "Nowy tekst"
+
+        primaries = self._primary_pl_rows(db_session, piece.id)
+        assert len(primaries) == 1
+        assert primaries[0].id == old_row.id  # same row, not a new one
+
+    # ------------------------------------------------------------------
+    # Uniqueness: multiple stray primary rows are demoted
+    # ------------------------------------------------------------------
+
+    def test_extra_primary_rows_are_demoted(self, db_session):
+        """If somehow two rows have is_primary=True the call must fix that."""
+        piece = self._make_piece(db_session)
+
+        row1 = Translation(
+            music_piece_id=piece.id,
+            language="pl",
+            is_primary=True,
+            kind=TranslationKind.LITERAL,
+            text="Row 1",
+        )
+        row2 = Translation(
+            music_piece_id=piece.id,
+            language="pl",
+            is_primary=True,
+            kind=TranslationKind.SINGABLE,
+            text="Row 2",
+        )
+        db_session.add_all([row1, row2])
+        db_session.commit()
+
+        # row1 will be found first as 'primary' (first match); row2 must be demoted
+        MusicPieceService.set_primary_translation_pl(db_session, piece.id, "Canonical")
+        db_session.commit()
+
+        primaries = self._primary_pl_rows(db_session, piece.id)
+        assert len(primaries) == 1
+        assert primaries[0].text == "Canonical"
 
 
 class TestFileServiceSaveOcrResult:

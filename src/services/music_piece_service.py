@@ -4,7 +4,7 @@ from typing import List, Optional, Tuple
 
 from sqlalchemy.orm import Session
 
-from src.database.models import MusicPiece
+from src.database.models import MusicPiece, Translation, TranslationKind
 
 
 class MusicPieceService:
@@ -128,3 +128,72 @@ class MusicPieceService:
         db.delete(piece)
         db.flush()
         return True
+
+    @staticmethod
+    def set_primary_translation_pl(
+        db: Session, piece_id: int, text: Optional[str]
+    ) -> Optional[MusicPiece]:
+        """Upsert the primary Polish translation, keeping the legacy column in sync.
+
+        Writes the text to both:
+        - ``MusicPiece.lyrics_translation_pl`` (legacy column, for backwards compatibility)
+        - The ``Translation`` table row with ``language="pl"`` and ``is_primary=True``
+
+        When *text* is empty or None the primary Translation row is deleted (if it
+        exists) and the legacy column is set to None.  All other ``pl`` rows for the
+        same piece have ``is_primary`` forced to False so that
+        ``MusicPiece.primary_translation_pl`` is never ambiguous.
+
+        Caller is responsible for committing via ``get_db_session``.
+
+        Args:
+            db: Active SQLAlchemy session.
+            piece_id: Primary key of the piece to update.
+            text: Translation text. Empty strings are normalised to None.
+
+        Returns:
+            Updated MusicPiece instance, or None if piece_id does not exist.
+        """
+        piece = db.query(MusicPiece).filter(MusicPiece.id == piece_id).first()
+        if piece is None:
+            return None
+
+        text = (text or "").strip() or None
+
+        # Always mirror to the legacy column so the fallback path stays correct.
+        piece.lyrics_translation_pl = text
+
+        # Load all existing Polish Translation rows for this piece.
+        pl_rows = (
+            db.query(Translation)
+            .filter(Translation.music_piece_id == piece_id, Translation.language == "pl")
+            .all()
+        )
+
+        primary = next((t for t in pl_rows if t.is_primary), None)
+
+        if text is None:
+            # Clear: remove the primary row; leave any non-primary rows untouched.
+            if primary is not None:
+                db.delete(primary)
+        else:
+            # Demote every *other* pl row that incorrectly carries is_primary=True
+            # so we end up with exactly one primary.
+            for row in pl_rows:
+                if row is not primary and row.is_primary:
+                    row.is_primary = False
+
+            if primary is None:
+                primary = Translation(
+                    music_piece_id=piece.id,
+                    language="pl",
+                    is_primary=True,
+                    kind=TranslationKind.LITERAL,
+                    text=text,
+                )
+                db.add(primary)
+            else:
+                primary.text = text
+
+        db.flush()
+        return piece
